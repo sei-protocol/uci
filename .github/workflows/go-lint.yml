@@ -21,7 +21,7 @@ jobs:
           # TODO: Automate fetch from go.mod.
           go-version: '${{ inputs.go-version }}'
       - name: Run repo-specific setup
-        uses: ./.github/actions/go-check-setup
+        uses: ./.github/actions/go-lint-setup
         if: hashFiles('./.github/actions/go-lint-setup') != ''
       - name: Check module tidiness
         run: |
