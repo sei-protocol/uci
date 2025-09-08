@@ -1,6 +1,8 @@
 version: 2
 updates:
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - ".github/workflows"
+      - "actions"
     schedule:
       interval: "weekly"
