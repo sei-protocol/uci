@@ -1,4 +1,4 @@
-name: Releaser
+name: Release
 on:
   workflow_call:
     inputs:
@@ -12,6 +12,7 @@ on:
 
 jobs:
   releaser:
+    name: Publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
