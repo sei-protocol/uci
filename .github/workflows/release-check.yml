@@ -1,4 +1,4 @@
-name: Release Checker
+name: Release
 on:
   workflow_call:
     inputs:
@@ -9,6 +9,7 @@ on:
 
 jobs:
   release-check:
+    name: Check
     runs-on: ubuntu-latest
     steps:
       - run: echo "EOF=EOF$RANDOM" >> $GITHUB_ENV
