@@ -39,7 +39,7 @@ jobs:
               pr = open[0];
             }
             core.setOutput('json', JSON.stringify(pr));
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: stable
