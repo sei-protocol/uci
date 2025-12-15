@@ -38,6 +38,6 @@ jobs:
           copy_assignees: 'true'
           add_labels: 'backport'
           pull_title: |-
-            [Backport ${target_branch}: ${pull_title}
+            Backport `${target_branch}`: ${pull_title}
           pull_description: |-
             Backport of #${pull_number} to `${target_branch}`.
