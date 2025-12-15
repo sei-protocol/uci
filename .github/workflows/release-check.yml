@@ -61,7 +61,7 @@ jobs:
         env:
           BRANCHES: ${{ inputs.branches }}
           BASE_REF: ${{ fromJSON(steps.pr.outputs.json).base.ref }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const branches = JSON.parse(process.env.BRANCHES);
