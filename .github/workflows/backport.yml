@@ -18,12 +18,16 @@ jobs:
     # Only run if:
     #  - triggered by pull request merging, or
     #  - a label starting with `backport ` is added to a merged PR, or
+    #  - `/backport` commented on a PR by someone other than the backport bot
     if: >
-      github.event_name == 'pull_request_target' &&
-      github.event.pull_request.merged &&
       (
-        github.event.action == 'closed' ||
-        (github.event.action == 'labeled' && startsWith(github.event.label.name, 'backport '))
+        github.event_name == 'pull_request_target' &&
+        github.event.pull_request.merged
+      ) || (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.comment.user.id != 97796249 &&
+        startsWith(github.event.comment.body, '/backport')
       )
     steps:
       - uses: actions/checkout@v4
