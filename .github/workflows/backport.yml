@@ -41,4 +41,8 @@ jobs:
             Backport `${target_branch}`: ${pull_title}
           pull_description: |-
             Backport of #${pull_number} to `${target_branch}`.
-          conflict_resolution: draft_commit_conflicts
+          experimental: |-
+            {
+              "conflict_resolution": "draft_commit_conflicts"
+            }
+
