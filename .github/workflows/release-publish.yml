@@ -123,7 +123,7 @@ jobs:
         run: jq . <<< "$RELEASE" > release.json
       - name: Upload release.json
         if: steps.release.outputs.id != ''
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: release
           path: release.json
