@@ -18,7 +18,7 @@ jobs:
     # Only run if:
     #  - triggered by pull request merging, or
     #  - a label starting with `backport ` is added to a merged PR, or
-    #  - `/backport` commented on a PR by someone other than the backport bot
+    #  - `/backport` commented on a PR by someone other than "Sei Platform / Code Agent" GitHub App.
     if: >
       (
         github.event_name == 'pull_request_target' &&
@@ -26,14 +26,22 @@ jobs:
       ) || (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
-        github.event.comment.user.id != 97796249 &&
+        github.event.comment.user.id != fromJSON(vars.PLATFORM_CODE_AGENT_USER_ID) &&
         startsWith(github.event.comment.body, '/backport')
       )
     steps:
+      - name: Generate GitHub App token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
+
       - uses: actions/checkout@v6
       - name: Create backport pull requests
         uses: korthout/backport-action@v4.0.1
         with:
+          github_token: ${{ steps.generate-token.outputs.token }}
           add_author_as_assignee: 'true'
           copy_assignees: 'true'
           add_labels: 'backport'
@@ -45,4 +53,3 @@ jobs:
             {
               "conflict_resolution": "draft_commit_conflicts"
             }
-
