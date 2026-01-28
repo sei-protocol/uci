@@ -15,7 +15,7 @@ jobs:
     name: Publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - id: version
         name: Determine version
         run: jq -r .version version.json | xargs -I{} echo "version={}" | tee -a $GITHUB_OUTPUT
@@ -123,7 +123,7 @@ jobs:
         run: jq . <<< "$RELEASE" > release.json
       - name: Upload release.json
         if: steps.release.outputs.id != ''
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: release
           path: release.json
