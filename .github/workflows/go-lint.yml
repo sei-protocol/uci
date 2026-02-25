@@ -25,9 +25,17 @@ jobs:
         if: hashFiles('./.github/actions/go-lint-setup') != ''
       - name: Check module tidiness
         run: |
+          had_sum=$( [ -f go.sum ] && echo true || echo false )
           go mod tidy
           git diff --exit-code go.mod
-          git diff --exit-code go.sum
+          if [ -f go.sum ]; then
+            if [ "$had_sum" = true ]; then
+              git diff --exit-code go.sum
+            else
+              echo "error: go.sum was created by 'go mod tidy' but is not checked in"
+              exit 1
+            fi
+          fi
       - name: Vet Go files
         if: always()
         run: go vet ./...
