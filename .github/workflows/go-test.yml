@@ -18,21 +18,9 @@ on:
 
 jobs:
   test:
-    name: ${{ matrix.name }}
+    name: Test
     runs-on: ubuntu-latest
-    if: inputs.test || inputs.race
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Test
-            flags: ''
-            enabled: ${{ inputs.test }}
-          - name: Test (race)
-            flags: '-race'
-            enabled: ${{ inputs.race }}
-        exclude:
-          - enabled: false
+    if: inputs.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -44,4 +32,21 @@ jobs:
         uses: ./.github/actions/go-test-setup
         if: hashFiles('./.github/actions/go-test-setup') != ''
       - name: Run tests
-        run: go test ${{ matrix.flags }} ./...
+        run: go test ./...
+
+  race:
+    name: Test (race)
+    runs-on: ubuntu-latest
+    if: inputs.race
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '${{ inputs.go-version }}'
+      - name: Run repo-specific setup
+        uses: ./.github/actions/go-test-setup
+        if: hashFiles('./.github/actions/go-test-setup') != ''
+      - name: Run tests
+        run: go test -race ./...
