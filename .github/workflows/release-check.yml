@@ -154,7 +154,7 @@ jobs:
         # see https://github.com/golang/exp/commits/master/cmd/gorelease
         run: |
           go mod download
-          go install golang.org/x/exp/cmd/gorelease@f062dba9d201f5ec084d25785efec05637818c00 # https://cs.opensource.google/go/x/exp/+/f062dba9d201f5ec084d25785efec05637818c00
+          go install golang.org/x/exp/cmd/gorelease@3dfff04db8fa6b6338ec60a0317f99db30637e41 # https://cs.opensource.google/go/x/exp/+/3dfff04db8fa6b6338ec60a0317f99db30637e41
           output=$((gorelease -base "$PREV_VERSION") 2>&1 || true)
           printf "output<<$EOF\n%s\n$EOF" "$output" >> $GITHUB_OUTPUT
       - id: gocompat
