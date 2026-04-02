@@ -48,7 +48,7 @@ jobs:
           ORG="${ORG_TEAM%%/*}"
           TEAM="${ORG_TEAM##*/}"
           if ! gh api "orgs/${ORG}/teams/${TEAM}/memberships/${COMMENT_USER}" --silent; then
-            echo "::error::User ${COMMENT_USER} is not a member of ${ORG}/${TEAM"
+            echo "::error::User ${COMMENT_USER} is not a member of ${ORG}/${TEAM}"
             exit 1
           fi
           echo "User ${COMMENT_USER} is a member of ${ORG_TEAM}"
