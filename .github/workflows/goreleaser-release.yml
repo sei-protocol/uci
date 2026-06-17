@@ -92,7 +92,9 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: ${{ inputs.go-version }}
-          go-version-file: ${{ inputs.go-version-file }}
+          # When neither version input is given, default to <working-directory>/go.mod
+          # so version auto-detection works for callers building in a subdirectory.
+          go-version-file: ${{ inputs.go-version-file != '' && inputs.go-version-file || (inputs.go-version == '' && format('{0}/go.mod', inputs.working-directory) || '') }}
       - name: Run prebuild script
         if: inputs.prebuild-script != ''
         working-directory: ${{ inputs.working-directory }}
