@@ -89,7 +89,7 @@ jobs:
         contains(github.event.review.body, inputs.trigger-phrase)
       )
     permissions:
-      contents: write        # capped by the caller; only used with allow-write + caller grant
+      contents: write
       pull-requests: write   # post the reply / in-thread reply
       issues: write          # reply on the PR conversation timeline
       id-token: write        # Anthropic workload identity federation (OIDC)
