@@ -58,8 +58,6 @@ on:
         type: number
         default: 10
 
-permissions: { }
-
 concurrency:
   # One reply at a time per PR; never cancel a reply that is mid-generation.
   group: seidroid-reply-${{ github.event.issue.number || github.event.pull_request.number }}
@@ -148,14 +146,14 @@ jobs:
           echo "rid=${RID}"      >> "$GITHUB_OUTPUT"
       - name: Checkout repository
         if: steps.gate.outputs.is_member == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Fetch assistant prompt
         if: steps.gate.outputs.is_member == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: sei-protocol/uci
           ref: ${{ inputs.uci-ref }}

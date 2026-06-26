@@ -345,7 +345,7 @@ jobs:
           private-key: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
           persist-credentials: false
