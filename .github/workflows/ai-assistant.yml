@@ -193,9 +193,10 @@ jobs:
           # request. --append-system-prompt steers HOW it replies without leaving tag mode.
           trigger_phrase: ${{ inputs.trigger-phrase }}
           claude_args: |
-            --allowedTools "${{ inputs.allow-write && 'Read,Glob,Grep,Edit,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git commit:*)' || 'Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)' }}"
+            --allowedTools "${{ inputs.allow-write && 'Read,Glob,Grep,Edit,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git commit:*)' || 'Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*)' }}"
             ${{ inputs.claude-model != '' && format('--model {0}', inputs.claude-model) || '' }}
             --append-system-prompt "${{ steps.prompt.outputs.text }}"
+
       - name: Clear 👀 when done
         if: always() && steps.ack.outputs.rid != ''
         env:
