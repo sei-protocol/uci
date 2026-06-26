@@ -132,13 +132,11 @@ jobs:
           fi
 
       - name: Checkout repository
-        # Only needed when we're actually going to respond. In tag mode the action runs
-        # `git` to check out the PR branch, so the workspace must be a git repo first.
         if: steps.gate.outputs.is_member == 'true'
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Fetch assistant prompt
         if: steps.gate.outputs.is_member == 'true'
