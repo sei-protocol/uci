@@ -87,7 +87,6 @@ jobs:
         contains(github.event.review.body, inputs.trigger-phrase)
       )
     permissions:
-      contents: write
       pull-requests: write   # post the reply / in-thread reply
       issues: write          # reply on the PR conversation timeline
       id-token: write        # Anthropic workload identity federation (OIDC)
@@ -147,9 +146,6 @@ jobs:
       - name: Checkout repository
         if: steps.gate.outputs.is_member == 'true'
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
 
       - name: Fetch assistant prompt
         if: steps.gate.outputs.is_member == 'true'
