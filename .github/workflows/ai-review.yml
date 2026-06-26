@@ -455,20 +455,28 @@ jobs:
             }
             const inlineBlockers = reviewComments.filter(c => c.severity === "blocker").length;
             const inlineOther = reviewComments.length - inlineBlockers;
+            const orphanedBlockers = orphaned.filter(c => c.severity === "blocker").length;
+
+            // Blocker-driven gate: pass iff there are zero blocker findings anywhere
+            // (PR/file-level, anchored inline, or orphaned inline). Supersedes Claude's
+            // reported `verdict` whenever we actually have parsed output.
+            const totalBlockers = blockers.length + inlineBlockers + orphanedBlockers;
+            if (haveOutput) verdict = totalBlockers > 0 ? "failure" : "success";
 
             // ---- 4) Assemble the review body ---------------------------------
             let body;
             if (!haveOutput) {
-              body = "## AI Review\n\nThe automated review did not complete; see the failing **AI Review** check for details.";
+              body = "The automated review did not complete; see the failing **AI Review** check for details.";
             } else {
-              const L = [`## AI Review -- ${verdict}`];
-              if (summary) L.push("", summary);
-              L.push("", `**Findings:** ${blockers.length + inlineBlockers} blocking | ${nonBlockers.length + inlineOther} non-blocking | ${reviewComments.length} posted inline`);
+              const L = [];
+              if (summary) L.push(summary);
+              L.push("", `**Findings:** ${totalBlockers} blocking | ${nonBlockers.length + inlineOther} non-blocking | ${reviewComments.length} posted inline`);
 
               L.push("", "### Blockers");
               if (blockers.length) blockers.forEach(b => L.push(`- ${b}`));
               else L.push("- _None at the file/PR level._");
               if (inlineBlockers) L.push(`- _${inlineBlockers} blocking issue(s) flagged inline on specific lines._`);
+              if (orphanedBlockers) L.push(`- _${orphanedBlockers} blocking issue(s) listed below under unanchored comments._`);
 
               L.push("", "### Non-blocking");
               if (nonBlockers.length) nonBlockers.forEach(n => L.push(`- ${n}`));
