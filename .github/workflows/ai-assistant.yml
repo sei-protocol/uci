@@ -143,15 +143,6 @@ jobs:
           RID="$(gh api --method POST "$EP" -f content=eyes --jq '.id')"
           echo "endpoint=${EP}"  >> "$GITHUB_OUTPUT"
           echo "rid=${RID}"      >> "$GITHUB_OUTPUT"
-      - name: Generate GitHub App token (to read uci prompts)
-        id: app-token
-        if: steps.gate.outputs.is_member == 'true'
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
-          private-key: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
-          owner: ${{ github.repository_owner }}
-          repositories: uci
       - name: Checkout repository
         if: steps.gate.outputs.is_member == 'true'
         uses: actions/checkout@v7
