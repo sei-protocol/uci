@@ -25,7 +25,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       release_created: ${{ steps.release.outputs.id != '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: version
         name: Determine version
         run: jq -r .version version.json | xargs -I{} echo "version={}" | tee -a $GITHUB_OUTPUT
