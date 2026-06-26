@@ -58,7 +58,7 @@ on:
         type: number
         default: 10
 
-permissions: {}
+permissions: { }
 
 concurrency:
   # One reply at a time per PR; never cancel a reply that is mid-generation.
@@ -192,7 +192,6 @@ jobs:
           # No `prompt` -> the action stays in tag mode and treats the comment text as the
           # request. --append-system-prompt steers HOW it replies without leaving tag mode.
           trigger_phrase: ${{ inputs.trigger-phrase }}
-          track_progress: 'false'
           claude_args: |
             --allowedTools "${{ inputs.allow-write && 'Read,Glob,Grep,Edit,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git commit:*)' || 'Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)' }}"
             ${{ inputs.claude-model != '' && format('--model {0}', inputs.claude-model) || '' }}
