@@ -17,7 +17,7 @@ jobs:
         name: Retrieve PR information
         env:
           PULL_REQUEST: ${{ toJSON(github.event.pull_request) }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             let pr = JSON.parse(process.env.PULL_REQUEST);
@@ -39,7 +39,7 @@ jobs:
               pr = open[0];
             }
             core.setOutput('json', JSON.stringify(pr));
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version: stable
@@ -61,7 +61,7 @@ jobs:
         env:
           BRANCHES: ${{ inputs.branches }}
           BASE_REF: ${{ fromJSON(steps.pr.outputs.json).base.ref }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const branches = JSON.parse(process.env.BRANCHES);
