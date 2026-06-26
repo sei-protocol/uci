@@ -130,7 +130,22 @@ jobs:
             echo "is_member=false" >> "$GITHUB_OUTPUT"
             echo "::notice::${ACTOR} is not an active member of ${ORG_TEAM}; seidroid will not respond."
           fi
-
+      - name: React 👀 while working
+        id: ack
+        if: steps.gate.outputs.is_member == 'true' && github.event_name != 'pull_request_review'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          CID: ${{ github.event.comment.id }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            EP="repos/${REPO}/pulls/comments/${CID}/reactions"
+          else
+            EP="repos/${REPO}/issues/comments/${CID}/reactions"
+          fi
+          RID="$(gh api --method POST "$EP" -f content=eyes --jq '.id')"
+          echo "endpoint=${EP}"  >> "$GITHUB_OUTPUT"
+          echo "rid=${RID}"      >> "$GITHUB_OUTPUT"
       - name: Checkout repository
         if: steps.gate.outputs.is_member == 'true'
         uses: actions/checkout@v6
@@ -177,7 +192,15 @@ jobs:
           # No `prompt` -> the action stays in tag mode and treats the comment text as the
           # request. --append-system-prompt steers HOW it replies without leaving tag mode.
           trigger_phrase: ${{ inputs.trigger-phrase }}
+          track_progress: 'false'
           claude_args: |
-            --allowedTools "${{ inputs.allow-write && 'Read,Glob,Grep,Edit,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git commit:*)' || 'Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*)' }}"
+            --allowedTools "${{ inputs.allow-write && 'Read,Glob,Grep,Edit,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git commit:*)' || 'Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)' }}"
             ${{ inputs.claude-model != '' && format('--model {0}', inputs.claude-model) || '' }}
             --append-system-prompt "${{ steps.prompt.outputs.text }}"
+      - name: Clear 👀 when done
+        if: always() && steps.ack.outputs.rid != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EP: ${{ steps.ack.outputs.endpoint }}
+          RID: ${{ steps.ack.outputs.rid }}
+        run: gh api --method DELETE "${EP}/${RID}" || true
