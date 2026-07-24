@@ -115,7 +115,7 @@ jobs:
           repositories: uci
 
       - name: Fetch seidroid prompt files
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: sei-protocol/uci
           ref: ${{ inputs.uci-ref }}
@@ -181,7 +181,7 @@ jobs:
       message: ${{ steps.codex.outputs.final-message }}
     steps:
       - name: Checkout PR
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
@@ -244,7 +244,7 @@ jobs:
       message: ${{ steps.cursor.outputs.message }}
     steps:
       - name: Checkout PR
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
