@@ -10,6 +10,12 @@ run-name: UCI / AI Review
 #   * claude_review -> consumes BOTH, does its own review, MERGES all three, returns TYPED
 #                      output, then a github-script step posts one PR review + a check run.
 #
+# Skip switch: label a PR with the `skip-review-label` input value (default `ai: skip-review`)
+# and the whole pipeline is skipped -- no scouts, no Claude review, no PR review, no
+# "AI Review" check run. For adding/removing the label to take effect immediately (not just
+# on the next push), the caller should include `labeled` and `unlabeled` in its
+# `pull_request` trigger types.
+#
 # Call it from a `pull_request` event (see .github/seidroid/README.md). It refuses to run
 # under `pull_request_target`.
 on:
@@ -45,6 +51,11 @@ on:
         required: false
         type: string
         default: 'REVIEW.md'
+      skip-review-label:
+        description: "If this label is present on the PR, the entire review pipeline is skipped."
+        required: false
+        type: string
+        default: 'ai: skip-review'
       runs-on:
         description: "Runner label."
         required: false
@@ -80,7 +91,9 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ${{ inputs.runs-on }}
-    if: github.event.pull_request.draft == false
+    # Skipping preflight cascades: the scouts are skipped via `needs`, and claude_review
+    # re-gates on `needs.preflight.result == 'success'`.
+    if: "${{ github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
     permissions:
       contents: read
     outputs:
@@ -173,7 +186,7 @@ jobs:
     name: Codex
     needs: preflight
     runs-on: ${{ inputs.runs-on }}
-    if: ${{ inputs.enable-codex && github.event.pull_request.draft == false }}
+    if: "${{ inputs.enable-codex && github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -236,7 +249,7 @@ jobs:
     name: Cursor
     needs: preflight
     runs-on: ${{ inputs.runs-on }}
-    if: ${{ inputs.enable-cursor && github.event.pull_request.draft == false }}
+    if: "${{ inputs.enable-cursor && github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -320,8 +333,10 @@ jobs:
     needs: [preflight, codex_review, cursor_review]
     runs-on: ${{ inputs.runs-on }}
     # `!cancelled()` so this still runs when a scout is skipped (toggled off) or fails;
-    # `needs.preflight.result == 'success'` re-gates on the guard + prompt assembly.
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && github.event.pull_request.draft == false }}
+    # `needs.preflight.result == 'success'` re-gates on the guard + prompt assembly (and
+    # therefore also on the skip-review label, which skips preflight). The explicit label
+    # check here is belt-and-suspenders.
+    if: "${{ !cancelled() && needs.preflight.result == 'success' && github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
