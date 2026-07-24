@@ -384,7 +384,7 @@ jobs:
         # Run on review success AND failure (to report the verdict), but NOT when the run
         # was cancelled by `concurrency` (a superseded push) -- the newer run posts instead.
         if: ${{ !cancelled() }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
           APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
