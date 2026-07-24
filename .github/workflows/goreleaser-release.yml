@@ -89,7 +89,7 @@ jobs:
           echo "Checking out latest tag: ${LATEST_TAG}"
           git checkout "${LATEST_TAG}"
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.go-version }}
           # When neither version input is given, default to <working-directory>/go.mod
