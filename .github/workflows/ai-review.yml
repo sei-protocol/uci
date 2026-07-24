@@ -14,7 +14,8 @@ run-name: UCI / AI Review
 # and the whole pipeline is skipped -- no scouts, no Claude review, no PR review, no
 # "AI Review" check run. For adding/removing the label to take effect immediately (not just
 # on the next push), the caller should include `labeled` and `unlabeled` in its
-# `pull_request` trigger types.
+# `pull_request` trigger types. Those events run this workflow only when the changed label
+# is the configured skip label; changes to other labels are ignored.
 #
 # Call it from a `pull_request` event (see .github/seidroid/README.md). It refuses to run
 # under `pull_request_target`.
@@ -93,7 +94,15 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     # Skipping preflight cascades: the scouts are skipped via `needs`, and claude_review
     # re-gates on `needs.preflight.result == 'success'`.
-    if: "${{ github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
+    if: >-
+      ${{
+        github.event.pull_request.draft == false &&
+        !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) &&
+        (
+          (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+          github.event.label.name == inputs.skip-review-label
+        )
+      }}
     permissions:
       contents: read
     outputs:
