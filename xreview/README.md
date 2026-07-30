@@ -99,10 +99,12 @@ without that scale set cannot schedule the `xreview` job, and the run never star
   blanket-approves a Write/Edit or an MCP/web egress. It does **not** make the agent
   read-only: `Bash` is permitted (it is the carrier for `git`/`gh` reads), so `gh`,
   `git push`, and `curl` remain reachable inside the sandbox. The read-only guarantee for
-  untrusted content therefore rests on three controls outside this policy — the
-  trusted-commenter gate, the untrusted-content instruction in the review prompt, and a
-  server-side shell gate enforced against the full command — not on the tool policy blocking
-  egress.
+  untrusted content therefore depends on three controls outside this policy, not on the tool
+  policy blocking egress: the trusted-commenter gate, the untrusted-content instruction in the
+  review prompt, and a server-side shell gate against the full command. The first two are in
+  place; the shell gate is a precondition to confirm before running over untrusted content or
+  enabling real posts (see "Before enabling real posts"), so treat the read-only guarantee as
+  not yet fully established until it holds.
 - **Untrusted PR content is data, not instructions.** The review prompt instructs the agent
   to treat the diff, file contents, commit messages, and title/body as untrusted material to
   review, never as directives, and to report an embedded directive as a possible
@@ -124,22 +126,29 @@ without that scale set cannot schedule the `xreview` job, and the run never star
   untrusted-content instruction and the server-side shell gate are load-bearing before real
   posting is enabled.
 
-### Before enabling real posts
+### Before enabling real posts — and before pointing dry-run at untrusted content
 
-Dry-run is safe to run now. Before setting `SEIDROID_XREVIEW_DRY_RUN=false` on any repo,
-confirm all of:
+Dry-run gates only the *driver's* verdict post. It is **not** a security boundary against the
+agent's own vended `pull_requests: write` token: on untrusted content (e.g. a fork PR) with no
+server-side shell gate, a prompt injection can still drive a real `gh`/`git` write via the
+auto-accepted `Bash` tool **even in dry-run**. So the preconditions below gate two actions —
+(a) setting `SEIDROID_XREVIEW_DRY_RUN=false` to enable real posts, and (b) running the bot at
+all (even dry-run) over untrusted content. Confirm before either:
 
-1. **A successful dry run** has completed on that repo (the composite action and trigger
-   workflow have not yet run in GitHub Actions at all).
-2. **A server-side shell gate is enforced** for the `sei-droid` managed agent (or the agent
-   is restricted to a structured read-only tool set), so a prompt-injection string in a diff
-   cannot drive `gh` / `git push` / `curl`.
-3. **The vended runner token is confirmed minimally scoped** for what review needs, given
-   that an injection would run under it.
-4. **Reviewed content is first-party / trusted**, or item 2 is in place — because the trigger
+1. **A successful dry run over first-party content** has completed on that repo (the composite
+   action and trigger workflow have not yet run in GitHub Actions at all) — required before
+   enabling real posts.
+2. **A server-side shell gate is enforced** for the `sei-droid` managed agent (or the agent is
+   restricted to a structured read-only tool set), so a prompt-injection string cannot drive
+   `gh` / `git push` / `curl`.
+3. **The vended runner token is confirmed minimally scoped** for what review needs, given that
+   an injection would run under it.
+4. **Reviewed content is first-party / trusted, OR item 2 is in place** — this applies in
+   dry-run too, because dry-run does not neuter the vended write token, and the trigger
    authenticates the commenter, not the code.
 
-Until these hold, keep the bot in dry-run.
+Dry-run over first-party / trusted content is safe to run now. Keep real posting disabled —
+and keep the bot off untrusted content — until the items above hold.
 
 ## Status
 

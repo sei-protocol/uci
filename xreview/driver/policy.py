@@ -125,9 +125,11 @@ def fail_closed_policy(_elicitation: Elicitation) -> Action:
 def dry_run_guard(inner: DecisionFn) -> DecisionFn:
     """Wrap a policy so it can only accept a permitted-by-identity tool.
 
-    The agent is read-only in both modes (the driver posts the verdict, the
-    agent does not), so the same identity set applies; this wrapper keeps a
-    dry run from accepting anything ``inner`` might, regardless of ``inner``.
+    The same identity set applies in both modes, so this wrapper keeps a dry
+    run from accepting anything ``inner`` might, regardless of ``inner``. It
+    does NOT make the agent read-only: ``Bash`` is permitted in both modes, and
+    dry-run gates only the *driver's* verdict post — not the agent's own
+    ``gh``/``git`` writes through its vended token (see the module docstring).
     """
 
     def decide(elicitation: Elicitation) -> Action:
