@@ -1,4 +1,4 @@
-"""CLI entrypoint: ``python -m driver <repo> <pr> [--dry-run]``."""
+"""CLI entrypoint: ``python -m driver <repo> <pr>``."""
 
 from __future__ import annotations
 
@@ -24,9 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     _install_terminate_handlers()
 
     trigger_id = args.trigger_id or f"manual:{args.repo}#{args.pr}"
-    req = ReviewRequest(
-        repo=args.repo, pr=args.pr, trigger_id=trigger_id, dry_run=args.dry_run
-    )
+    req = ReviewRequest(repo=args.repo, pr=args.pr, trigger_id=trigger_id)
     try:
         result = SessionDriver(cfg).run(req)
     except KeyboardInterrupt:
@@ -90,11 +88,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="seidroid-xreview")
     parser.add_argument("repo", help='"owner/name" of the repository')
     parser.add_argument("pr", type=int, help="pull request number")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="review only; decline every write/egress and do not post back",
-    )
     parser.add_argument(
         "--out",
         default=None,

@@ -4,8 +4,7 @@ name: seidroid xreview
 # trigger only fires from the default branch), then:
 #   1. Pin both refs below to a uci release tag or commit SHA (never a moving tag).
 #   2. Set the OMNIGENT_M2M_CLIENT_SECRET repo (or org) secret.
-#   3. Leave the SEIDROID_XREVIEW_DRY_RUN repo variable unset until you have watched a
-#      run (unset -> dry-run). Then comment `seidroid xreview` (or `... --dry-run`) on a
+#   3. Comment `seidroid xreview` on a
 #      PR to invoke.
 # The heavy lifting is the reusable workflow in sei-protocol/uci at
 # .github/workflows/seidroid-xreview.yml; this wrapper only wires the trigger.

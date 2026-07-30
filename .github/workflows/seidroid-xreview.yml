@@ -5,8 +5,7 @@ run-name: UCI / seidroid xreview
 # issue_comment trigger and calls this with `uses:` (template:
 # .github/seidroid/xreview/tools/seidroid-xreview.yml). Flow: comment
 # `seidroid xreview` on a PR -> trusted-commenter gate -> drive one managed sei-droid
-# omnigent session over the PR -> post one sticky verdict (or, in dry-run, write it to
-# the job summary and post nothing) -> tear the session down.
+# omnigent session over the PR -> post one sticky verdict -> tear the session down.
 #
 # The driver is fetched from sei-protocol/uci at `uci-ref` and run in-line, so a caller
 # updates by bumping the pinned ref — it never copies the review logic.
@@ -48,34 +47,24 @@ jobs:
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) }}
     outputs:
       should_run: ${{ steps.parse.outputs.should_run }}
-      dry_run: ${{ steps.parse.outputs.dry_run }}
       pr_number: ${{ steps.parse.outputs.pr_number }}
       comment_id: ${{ steps.parse.outputs.comment_id }}
     steps:
       - id: parse
         env:
           BODY: ${{ github.event.comment.body }}
-          # Reviewed repo's safety toggle. Unset -> dry-run (fail safe). Set to
-          # 'false' in Settings -> Secrets and variables -> Actions -> Variables
-          # to enable real posts.
-          REPO_DRY_RUN: ${{ vars.SEIDROID_XREVIEW_DRY_RUN }}
         run: |
           set -euo pipefail
           cmd="$(printf '%s' "$BODY" | tr -d '\r')"
-          # Match a LINE reading exactly `seidroid xreview` (optionally `--dry-run`)
-          # and CAPTURE it; the captured line — not the whole body — is what the
-          # --dry-run check below reads, so prose mentioning `--dry-run` elsewhere
-          # in the comment cannot force dry-run.
-          cmdline="$(printf '%s\n' "$cmd" | grep -m1 -E '^[[:space:]]*seidroid[[:space:]]+xreview([[:space:]]+--dry-run)?[[:space:]]*$' || true)"
+          # Require a LINE reading exactly `seidroid xreview`. Anchoring the match to a
+          # whole line is what keeps a comment that merely quotes or discusses the
+          # command from triggering a review.
+          cmdline="$(printf '%s\n' "$cmd" | grep -m1 -E '^[[:space:]]*seidroid[[:space:]]+xreview[[:space:]]*$' || true)"
           if [ -z "$cmdline" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "should_run=true" >> "$GITHUB_OUTPUT"
-          # dry-run = the flag ON THE COMMAND LINE, or the repo default. Unset -> TRUE.
-          dry="${REPO_DRY_RUN:-true}"
-          if printf '%s' "$cmdline" | grep -qE -- '--dry-run'; then dry=true; fi
-          echo "dry_run=$dry" >> "$GITHUB_OUTPUT"
           echo "pr_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
           # The comment id becomes the driver's per-trigger run key, so a
           # re-delivered comment adopts the same session rather than driving a
@@ -163,7 +152,6 @@ jobs:
           DRIVER_PYTHON: ${{ steps.runtime.outputs.python }}
           OMNIGENT_BASE_URL: ${{ inputs.omnigent-base-url }}
           OMNIGENT_API_TOKEN: ${{ steps.token.outputs.token }}
-          DRY_RUN: ${{ needs.guard.outputs.dry_run }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.guard.outputs.pr_number }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
@@ -176,7 +164,6 @@ jobs:
           # exact opt-in 'false' runs dry. --trigger-id scopes the run key to this
           # comment so a re-fire adopts rather than resurrects.
           args=("$REPO" "$PR" --out verdict.md)
-          if [ "$DRY_RUN" != "false" ]; then args+=(--dry-run); fi
           if [ -n "${TRIGGER_ID:-}" ]; then args+=(--trigger-id "$TRIGGER_ID"); fi
           set +e
           PYTHONPATH="$DRIVER_ROOT" XREVIEW_STATE_DIR="$RUNNER_TEMP/seidroid-state" \
@@ -198,10 +185,10 @@ jobs:
           fi
 
       - name: Post verdict (sticky upsert)
-        # Post ONLY in real-post mode AND only when a real verdict was produced. Keying
-        # on verdict_produced, not the exit code, so a teardown-only failure still posts
-        # a valid verdict and a no-verdict run never upserts a placeholder.
-        if: ${{ needs.guard.outputs.dry_run == 'false' && steps.drive.outputs.verdict_produced == 'true' }}
+        # Post only when a real verdict was produced. Keying on verdict_produced, not
+        # the exit code, so a teardown-only failure still posts a valid verdict and a
+        # no-verdict run never upserts a placeholder.
+        if: ${{ steps.drive.outputs.verdict_produced == 'true' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -220,12 +207,3 @@ jobs:
           else
             gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
           fi
-
-      - name: Dry-run summary (posts nothing)
-        # Surface the outcome for every non-real-post run (but not on cancellation).
-        if: ${{ !cancelled() && needs.guard.outputs.dry_run != 'false' }}
-        shell: bash
-        run: |
-          { echo "## sei-droid xreview (dry-run, not posted)"; echo; \
-            cat verdict.md 2>/dev/null || echo "_(no verdict produced — see the Drive step logs)_"; \
-          } >> "$GITHUB_STEP_SUMMARY"
