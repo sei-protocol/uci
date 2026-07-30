@@ -52,11 +52,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _write_verdict(path: str, result: RunResult) -> None:
-    """Write the human-readable verdict for the caller to post or summarize."""
-    if result.verdict is not None:
-        body = result.verdict.text
-    else:
-        body = f"sei-droid xreview produced no verdict (exit {int(result.exit_code)})."
+    """Write the verdict text for the caller to post — only on a real verdict.
+
+    On a no-verdict outcome (NO_VERDICT / TIMEOUT / TURN_FAILED) the file is
+    left absent, so the caller distinguishes "ready to post" from "nothing to
+    post" by file existence and never upserts a placeholder over a prior good
+    verdict. The exit code still carries the outcome for the caller to surface.
+    """
+    if result.verdict is None:
+        return
+    body = result.verdict.text
     if not body.endswith("\n"):
         body += "\n"
     with open(path, "w", encoding="utf-8") as handle:

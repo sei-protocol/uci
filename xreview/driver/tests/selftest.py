@@ -307,6 +307,43 @@ def test_verdict_parsing_requires_decision_key() -> None:
     )
 
 
+# ── Tests: _write_verdict file existence == verdict produced ──────────────
+
+
+def test_write_verdict_only_on_real_verdict() -> None:
+    """A no-verdict run leaves the out-file absent, so the action never upserts
+    a placeholder over a prior good verdict; a real verdict writes the text."""
+    import os
+    import tempfile
+
+    from driver.__main__ import _write_verdict
+    from driver.driver import RunResult
+    from driver.errors import ExitCode
+    from driver.verdict import Verdict
+
+    d = tempfile.mkdtemp()
+
+    real = os.path.join(d, "verdict-real.md")
+    verdict = Verdict(
+        assistant_item_id="a1",
+        text="Reviewed the change; approve.",
+        structured={"decision": "approve"},
+    )
+    _write_verdict(real, RunResult(exit_code=ExitCode.OK, verdict=verdict))
+    check(
+        "write-verdict: a real verdict writes the file with its text",
+        os.path.exists(real)
+        and "approve" in open(real, encoding="utf-8").read(),
+    )
+
+    absent = os.path.join(d, "verdict-none.md")
+    _write_verdict(absent, RunResult(exit_code=ExitCode.NO_VERDICT, verdict=None))
+    check(
+        "write-verdict: a no-verdict run leaves the file absent (no placeholder)",
+        not os.path.exists(absent),
+    )
+
+
 def main() -> int:
     for test in (
         test_structured_first_settle_no_nudge,
@@ -316,6 +353,7 @@ def main() -> int:
         test_stale_state_not_renudged_when_budget_remains,
         test_distinct_new_messages_each_consume_budget,
         test_verdict_parsing_requires_decision_key,
+        test_write_verdict_only_on_real_verdict,
     ):
         test()
     print()

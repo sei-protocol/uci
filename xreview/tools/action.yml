@@ -79,6 +79,7 @@ runs:
         echo "token=$token" >> "$GITHUB_OUTPUT"
 
     - name: Drive session + collect verdict
+      id: drive
       shell: bash
       env:
         DRIVER_PYTHON: ${{ steps.runtime.outputs.python }}
@@ -91,7 +92,8 @@ runs:
       run: |
         set -euo pipefail
         # Create exactly ONE managed sei-droid session, drive it, write the
-        # verdict to verdict.md, and DELETE the session on exit AND on
+        # verdict to verdict.md (ONLY when a real verdict is produced — the
+        # driver writes no placeholder), and DELETE the session on exit AND on
         # SIGTERM/SIGINT so a cancelled run leaves no live session. State
         # lives under RUNNER_TEMP (the generic runner has no /var/lib write).
         # Fail-closed: anything other than the exact opt-in 'false' runs dry.
@@ -100,14 +102,33 @@ runs:
         args=("$REPO" "$PR" --out verdict.md)
         if [ "$DRY_RUN" != "false" ]; then args+=(--dry-run); fi
         if [ -n "${TRIGGER_ID:-}" ]; then args+=(--trigger-id "$TRIGGER_ID"); fi
+        set +e
         PYTHONPATH="$GITHUB_ACTION_PATH/.." \
         XREVIEW_STATE_DIR="$RUNNER_TEMP/seidroid-state" \
           "$DRIVER_PYTHON" -m driver "${args[@]}"
+        rc=$?
+        set -e
+        # Downstream gates on whether a verdict was PRODUCED (verdict.md
+        # non-empty), not on the exit code: a teardown-only failure (verdict
+        # produced, DELETE failed) still publishes, and a no-verdict run
+        # (NO_VERDICT/TIMEOUT/TURN_FAILED) never posts a placeholder.
+        if [ -s verdict.md ]; then
+          echo "verdict_produced=true" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::driver exited $rc but produced a verdict (e.g. a teardown leak); see logs"
+          fi
+        else
+          echo "verdict_produced=false" >> "$GITHUB_OUTPUT"
+          echo "::error::driver produced no verdict (exit $rc)"
+          exit "$rc"
+        fi
 
     - name: Post verdict (sticky upsert)
-      # Fail-closed: post ONLY on the exact opt-in 'false' (real-post mode), and
-      # only when the drive step produced a verdict (implicit success()).
-      if: ${{ inputs.dry_run == 'false' }}
+      # Post ONLY in real-post mode AND only when a real verdict was produced
+      # (drive step's verdict_produced). Keying on verdict_produced, not the
+      # exit code, so a teardown-only failure still posts a valid verdict and a
+      # no-verdict run never upserts a placeholder over a prior good comment.
+      if: ${{ inputs.dry_run == 'false' && steps.drive.outputs.verdict_produced == 'true' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
