@@ -145,8 +145,15 @@ until the items above hold.
 
 The driver has been exercised end-to-end against live PRs: mint, session create, sandbox
 launch, the agent reading the PR through the credential bridge, a structured verdict, and
-teardown. The **reusable workflow and its thin caller** are being wired into their first repo
-now; the first `seidroid xreview` comment there is the comment-trigger path's first real test.
+teardown. The **reusable workflow and its thin caller** have carried a real
+`seidroid xreview` comment as far as the in-cluster runner: the trusted-commenter guard
+admitted it, the `xreview` job scheduled on `uci-default`, and the driver checked out at the
+caller's `uci-ref`. The steps from the bearer mint onward have not yet run on that runner,
+so treat the in-cluster half of the path as unproven until one run posts a verdict.
+
+Expect the gaps that remain to be runner-image ones rather than logic ones. The in-cluster
+image is not the hosted image the driver was developed against, and the mint and post steps
+assume `curl` and `gh` are on it, which is not yet confirmed the way the interpreter now is.
 
 Known gaps for a follow-up: the verdict currently posts as `github-actions[bot]` rather than
 `seidroid[bot]` (posting via the seidroid app token is a later change); and the

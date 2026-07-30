@@ -104,13 +104,21 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      # The interpreter comes from here rather than the runner image because an image is
+      # free to ship python3 without the venv module: the in-cluster ARC image does, and
+      # the venv below cannot bootstrap without ensurepip. This also fixes the version
+      # the driver runs under instead of inheriting whatever the image happens to carry.
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
       - name: Set up driver runtime
         id: runtime
         shell: bash
         run: |
           set -euo pipefail
           # A pinned venv keeps the httpx version deterministic regardless of the image.
-          command -v python3 >/dev/null 2>&1 || { echo "python3 not found on runner" >&2; exit 1; }
           venv="$RUNNER_TEMP/seidroid-venv"
           python3 -m venv "$venv"
           "$venv/bin/python" -m pip install --disable-pip-version-check --no-input --quiet "httpx==0.27.2"
