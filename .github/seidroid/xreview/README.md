@@ -24,7 +24,7 @@ sandbox and a minute of wall-clock, so it is opt-in per PR rather than automatic
 - `.github/workflows/seidroid-xreview.yml` — the **reusable workflow** this feature
   publishes (alongside `ai-review`/`ai-assistant`). On a `seidroid xreview` comment it runs
   the trusted-commenter guard, fetches the driver at the caller's `uci-ref`, mints the
-  omnigent bearer, drives the review, and posts the verdict (or, in dry-run, writes it to the
+  omnigent bearer, drives the review, and posts the verdict
   job summary). Callers reach it with `uses:`.
 - `driver/` — the session driver the reusable workflow runs. Creates exactly one managed
   `sei-droid` session, drives it through a review turn, auto-resolves the agent's permission
@@ -42,14 +42,14 @@ sandbox and a minute of wall-clock, so it is opt-in per PR rather than automatic
 1. A trusted commenter writes `seidroid xreview` on a PR.
 2. The trigger workflow's `guard` job (hosted runner, no secrets) checks the comment author
    is `OWNER`/`MEMBER`/`COLLABORATOR` and that the command line is exactly `seidroid xreview`
-   (optionally `--dry-run`), then resolves the dry-run flag.
+   as a whole line, so a comment that merely quotes or discusses it does not trigger.
 3. The reusable workflow's `xreview` job runs on the `uci-default` org ARC scale set,
    in-cluster. It fetches the driver at `uci-ref`, mints an omnigent bearer with the
    client-credentials grant, and runs the driver.
 4. The driver creates one managed `sei-droid` session, drives the review, and writes the
    verdict to a file only when a real verdict is produced.
 5. In real-post mode the workflow upserts a single `<!-- seidroid-xreview -->` comment on the
-   PR; in dry-run it writes the verdict to the job summary and posts nothing. Either way the
+   PR, and only when a real verdict was produced. Either way the
    session is deleted on exit, including on cancellation.
 
 ## Auth to omnigent
@@ -83,9 +83,8 @@ without that scale set cannot schedule the `xreview` job, and the run never star
    never a moving tag). Bump both to adopt a new xreview release.
 3. Set the `OMNIGENT_M2M_CLIENT_SECRET` repository (or organization) secret to the
    client-credentials secret; `secrets: inherit` in the caller passes it through. It is
-   required even for a dry run: the workflow always mints a bearer; dry-run controls only
+   required for every run: the workflow always mints a bearer to
    whether the verdict is posted.
-4. Leave `vars.SEIDROID_XREVIEW_DRY_RUN` unset (or `true`) until you have watched a real run.
    Setting it to `false` enables posting — and enabling posts grants the sandbox agent a
    write-capable path to the PR. Read "Before enabling real posts" below and keep it unset
    until every item there holds.
@@ -113,8 +112,9 @@ without that scale set cannot schedule the `xreview` job, and the run never star
   to treat the diff, file contents, commit messages, and title/body as untrusted material to
   review, never as directives, and to report an embedded directive as a possible
   prompt-injection finding.
-- **Dry-run is the default.** With the repo variable unset the run posts nothing, which is
-  the safe state for a new wiring.
+- **A run with no verdict posts nothing.** The post step keys on a real verdict having been
+  produced rather than on the exit code, so a failed or timed-out review leaves no comment and
+  a teardown-only failure still posts the verdict it did produce.
 - **One session per trigger, torn down best-effort.** `concurrency` cancels a superseded
   run; the driver traps `SIGTERM`/`SIGINT` and deletes its session on the way out. Under a
   hard kill (a grace period shorter than teardown, a signal mid-DELETE) a session can still
@@ -130,28 +130,24 @@ without that scale set cannot schedule the `xreview` job, and the run never star
   untrusted-content instruction and the server-side shell gate are load-bearing before real
   posting is enabled.
 
-### Before enabling real posts — and before pointing dry-run at untrusted content
+### Before pointing this at untrusted content
 
-Dry-run gates only the *driver's* verdict post. It is **not** a security boundary against the
-agent's own vended `pull_requests: write` token: on untrusted content (e.g. a fork PR) with no
-server-side shell gate, a prompt injection can still drive a real `gh`/`git` write via the
-auto-accepted `Bash` tool **even in dry-run**. So the preconditions below gate two actions —
-(a) setting `SEIDROID_XREVIEW_DRY_RUN=false` to enable real posts, and (b) running the bot at
-all (even dry-run) over untrusted content. Confirm before either:
+The agent holds a vended `pull_requests: write` token and an auto-accepted `Bash` tool, so on
+untrusted content (e.g. a fork PR) with no server-side shell gate a prompt injection can drive
+a real `gh`/`git` write. That risk belongs to running the agent at all, not to whether the
+driver posts its verdict, so there is no review mode that mitigates it. Confirm before pointing
+this at content you do not control:
 
-1. **A successful dry run over first-party content** has completed on that repo — required
-   before enabling real posts.
-2. **A server-side shell gate is enforced** for the `sei-droid` managed agent (or the agent is
+1. **A server-side shell gate is enforced** for the `sei-droid` managed agent (or the agent is
    restricted to a structured read-only tool set), so a prompt-injection string cannot drive
    `gh` / `git push` / `curl`.
-3. **The vended runner token is confirmed minimally scoped** for what review needs, given that
+2. **The vended runner token is confirmed minimally scoped** for what review needs, given that
    an injection would run under it.
-4. **Reviewed content is first-party / trusted, OR item 2 is in place** — this applies in
-   dry-run too, because dry-run does not neuter the vended write token, and the trigger
+3. **Reviewed content is first-party / trusted, OR item 1 is in place** — the trigger
    authenticates the commenter, not the code.
 
-Dry-run over first-party / trusted content is safe to run now. Keep real posting disabled —
-and keep the bot off untrusted content — until the items above hold.
+Running over first-party / trusted content is safe today. Keep the bot off untrusted content
+until the items above hold.
 
 ## Status
 
@@ -159,8 +155,6 @@ The driver has been exercised end-to-end against live PRs: mint, session create,
 launch, the agent reading the PR through the credential bridge, a structured verdict, and
 teardown. The **reusable workflow and its thin caller** are being wired into their first repo
 now; the first `seidroid xreview` comment there is the comment-trigger path's first real test.
-Keep `SEIDROID_XREVIEW_DRY_RUN` unset for that first run and read the job summary before
-enabling posts.
 
 Known gaps for a follow-up: the verdict currently posts as `github-actions[bot]` rather than
 `seidroid[bot]` (posting via the app token, as `ai-review` does, is a later change); and the

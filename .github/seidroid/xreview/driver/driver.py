@@ -24,7 +24,7 @@ from .idempotency import (
     finalize_lease,
     record_session,
 )
-from .policy import DecisionFn, Elicitation, best_effort_readonly_policy, dry_run_guard
+from .policy import DecisionFn, Elicitation, best_effort_readonly_policy
 from .verdict import (
     Verdict,
     assistant_message_ids,
@@ -40,7 +40,6 @@ class ReviewRequest:
     repo: str
     pr: int
     trigger_id: str
-    dry_run: bool = False
 
 
 @dataclass
@@ -74,9 +73,7 @@ class SessionDriver:
 
     def run(self, req: ReviewRequest) -> RunResult:
         run_key = compute_run_key(req.repo, req.pr, req.trigger_id)
-        emit(
-            "run.start", run_key=run_key, repo=req.repo, pr=req.pr, dry_run=req.dry_run
-        )
+        emit("run.start", run_key=run_key, repo=req.repo, pr=req.pr)
 
         lease = acquire_lease(
             self._cfg.state_dir,
@@ -95,7 +92,7 @@ class SessionDriver:
                 exit_code=ExitCode.OK, detail={"skipped": True, "prior": prior}
             )
 
-        decide = dry_run_guard(self._decision_fn) if req.dry_run else self._decision_fn
+        decide = self._decision_fn
         deadline = Deadline(self._cfg.run_deadline_s)
         result = RunResult(exit_code=ExitCode.OK)
 
@@ -415,12 +412,6 @@ def _build_prompt(req: ReviewRequest) -> str:
             '"summary" (string), and "findings" (array of {severity, note}).'
         ),
     ]
-    if req.dry_run:
-        lines.append("")
-        lines.append(
-            "DRY RUN: do not post any comment or review to GitHub and do not "
-            "push, merge, or otherwise mutate anything. Produce the verdict only."
-        )
     return "\n".join(lines)
 
 

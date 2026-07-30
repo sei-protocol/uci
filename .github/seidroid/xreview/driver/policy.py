@@ -120,21 +120,3 @@ def best_effort_readonly_policy(elicitation: Elicitation) -> Action:
 def fail_closed_policy(_elicitation: Elicitation) -> Action:
     """Decline everything. The safest possible default."""
     return "decline"
-
-
-def dry_run_guard(inner: DecisionFn) -> DecisionFn:
-    """Wrap a policy so it can only accept a permitted-by-identity tool.
-
-    The same identity set applies in both modes, so this wrapper keeps a dry
-    run from accepting anything ``inner`` might, regardless of ``inner``. It
-    does NOT make the agent read-only: ``Bash`` is permitted in both modes, and
-    dry-run gates only the *driver's* verdict post — not the agent's own
-    ``gh``/``git`` writes through its vended token (see the module docstring).
-    """
-
-    def decide(elicitation: Elicitation) -> Action:
-        if elicitation.tool_name not in _PERMITTED_TOOLS:
-            return "decline"
-        return inner(elicitation)
-
-    return decide
