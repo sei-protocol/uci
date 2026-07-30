@@ -1,9 +1,9 @@
 """Selftest for the verdict-completion logic in ``_drive_turn`` + ``verdict``.
 
-Run from the xreview/ root (or via this file directly; it puts xreview/ on
-``sys.path``)::
+Run from the repo root (or via this file directly; it puts its own
+``xreview/`` root on ``sys.path``)::
 
-    python xreview/driver/tests/selftest.py
+    python .github/seidroid/xreview/driver/tests/selftest.py
 
 Exercises the settle/nudge path with a scripted fake client and no real
 sleeps, covering: a structured verdict on first settle (no nudge); a

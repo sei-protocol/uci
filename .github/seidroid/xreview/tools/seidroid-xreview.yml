@@ -3,7 +3,7 @@ name: seidroid-xreview
 # Comment `seidroid xreview` on a PR -> trusted-commenter gate -> drive one managed
 # sei-droid omnigent session -> post one sticky verdict -> tear down.
 # Lives in the reviewed repo (sei-k8s-controller/.github/workflows/); the heavy lifting
-# is the pinned composite action in sei-protocol/uci at xreview/tools.
+# is the pinned composite action in sei-protocol/uci at .github/seidroid/xreview/tools.
 on:
   issue_comment:
     types: [created]
@@ -86,7 +86,7 @@ jobs:
     steps:
       - name: sei-droid xreview
         # Pin by SHA at wire-in (supply-chain: never a moving tag).
-        uses: sei-protocol/uci/xreview/tools@PIN_ME_TO_A_SHA
+        uses: sei-protocol/uci/.github/seidroid/xreview/tools@PIN_ME_TO_A_SHA
         with:
           repo: ${{ github.repository }}
           pr_number: ${{ needs.guard.outputs.pr_number }}

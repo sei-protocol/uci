@@ -25,7 +25,8 @@ sandbox and a minute of wall-clock, so it is opt-in per PR rather than automatic
   it through a review turn, auto-resolves the agent's permission prompts against a
   read-only policy, extracts the verdict, and tears the session down. Speaks the omnigent
   REST API directly over `httpx`. `driver/tests/selftest.py` covers the settle/nudge and
-  verdict-parsing logic with a scripted fake client (`python xreview/driver/tests/selftest.py`).
+  verdict-parsing logic with a scripted fake client
+  (`python .github/seidroid/xreview/driver/tests/selftest.py`).
 - `tools/action.yml` — the composite action this repo publishes. Mints the omnigent bearer,
   runs the driver, and (outside dry-run) upserts one sticky verdict comment.
 - `tools/seidroid-xreview.yml` — the trigger workflow. It is a template: copy it into the
@@ -73,7 +74,7 @@ without that scale set cannot schedule the `xreview` job, and the run never star
 
 1. Copy `tools/seidroid-xreview.yml` to the reviewed repo's
    `.github/workflows/seidroid-xreview.yml` on its default branch.
-2. Replace `PIN_ME_TO_A_SHA` in the `uses: sei-protocol/uci/xreview/tools@...` line with a
+2. Replace `PIN_ME_TO_A_SHA` in the `uses: sei-protocol/uci/.github/seidroid/xreview/tools@...` line with a
    full commit SHA of this repo. Pin to a SHA, never a moving tag.
 3. Set the `OMNIGENT_M2M_CLIENT_SECRET` repository (or environment) secret to the
    client-credentials secret. It is required even for a dry run: the action always mints a
