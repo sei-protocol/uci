@@ -30,8 +30,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = SessionDriver(cfg).run(req)
     except KeyboardInterrupt:
-        # A terminate signal unwound the run; the run's finally block has
-        # already deleted the omnigent session, so nothing leaks.
+        # A terminate signal unwound the run; the run's finally block runs
+        # teardown (DELETE the session) on the way out. Best-effort, not
+        # guaranteed: if the pre-SIGKILL grace period is shorter than
+        # teardown's HTTP calls, or a second signal lands mid-DELETE, the
+        # session can still leak. A server-side session TTL is the backstop.
         emit("run.cancelled")
         return int(ExitCode.CANCELLED)
 

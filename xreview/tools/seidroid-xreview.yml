@@ -25,12 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     if: >-
-      github.event.issue.pull_request != null &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      ${{ github.event.issue.pull_request != null &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) }}
     outputs:
       should_run: ${{ steps.parse.outputs.should_run }}
       dry_run: ${{ steps.parse.outputs.dry_run }}
       pr_number: ${{ steps.parse.outputs.pr_number }}
+      comment_id: ${{ steps.parse.outputs.comment_id }}
     steps:
       - id: parse
         env:
@@ -41,7 +42,9 @@ jobs:
         run: |
           set -euo pipefail
           cmd="$(printf '%s' "$BODY" | tr -d '\r')"
-          # Command line must be exactly `seidroid xreview` (optionally `--dry-run`).
+          # Trigger on a LINE reading exactly `seidroid xreview` (optionally
+          # `--dry-run`); grep is line-oriented, so the command may sit inside a
+          # longer comment as long as one line matches on its own.
           if ! printf '%s' "$cmd" | grep -qE '^[[:space:]]*seidroid[[:space:]]+xreview([[:space:]]+--dry-run)?[[:space:]]*$'; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -52,6 +55,10 @@ jobs:
           if printf '%s' "$cmd" | grep -qE -- '--dry-run'; then dry=true; fi
           echo "dry_run=$dry" >> "$GITHUB_OUTPUT"
           echo "pr_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          # The comment id becomes the driver's per-trigger run key, so a
+          # re-delivered comment adopts the same session rather than driving a
+          # new turn, and two distinct comments are two distinct runs.
+          echo "comment_id=${{ github.event.comment.id }}" >> "$GITHUB_OUTPUT"
 
   xreview:
     needs: guard
@@ -78,3 +85,4 @@ jobs:
           pr_number: ${{ needs.guard.outputs.pr_number }}
           dry_run: ${{ needs.guard.outputs.dry_run }}
           github_token: ${{ github.token }}
+          trigger_id: ${{ needs.guard.outputs.comment_id }}

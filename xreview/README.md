@@ -67,34 +67,79 @@ to post the verdict comment.
 
 ## Wiring it into a reviewed repo
 
+**Prerequisite:** the reviewed repo must be able to run jobs on the `uci-default` ARC scale
+set, which runs in-cluster and reaches omnigent over the ClusterIP Service. A repo or org
+without that scale set cannot schedule the `xreview` job, and the run never starts.
+
 1. Copy `tools/seidroid-xreview.yml` to the reviewed repo's
    `.github/workflows/seidroid-xreview.yml` on its default branch.
 2. Replace `PIN_ME_TO_A_SHA` in the `uses: sei-protocol/uci/xreview/tools@...` line with a
    full commit SHA of this repo. Pin to a SHA, never a moving tag.
 3. Set the `OMNIGENT_M2M_CLIENT_SECRET` repository (or environment) secret to the
    client-credentials secret. It is required even for a dry run: the action always mints a
-   bearer; dry-run controls only whether the verdict is posted.
+   bearer; dry-run controls only whether the verdict is posted. `OMNIGENT_M2M_CLIENT_ID`
+   defaults to `sei-droid` and is not a secret; to override it, add it to the **job-level**
+   `env:` block in the trigger workflow (step-level env does not reach the composite action).
 4. Leave `vars.SEIDROID_XREVIEW_DRY_RUN` unset (or `true`) until you have watched a real run.
-   Set it to `false` to enable posting. `OMNIGENT_M2M_CLIENT_ID` defaults to `sei-droid` and
-   is not a secret; override it with an env var if needed.
+   Setting it to `false` enables posting — but the trigger workflow and composite action have
+   not yet run in GitHub Actions, so your first `seidroid xreview` comment is their first real
+   test, and enabling posts grants the sandbox agent a write-capable path to the PR. Read
+   "Before enabling real posts" below and keep it unset until every item there holds.
 
 ## Security posture
 
-- **Trusted commenters only.** The guard admits only `OWNER`/`MEMBER`/`COLLABORATOR`
-  comment authors, so an untrusted PR author cannot trigger a run. The read-only policy
-  accepts the agent's read/inspect tools (including `Bash`, the carrier for `git`/`gh`
-  reads) by attested identity and declines every write, edit, or network-egress tool
-  fail-closed, so the turn never hangs on a human and never blanket-approves a mutation.
-  Accepting `Bash` by identity relies on the trusted-author gate; pointing this at
-  untrusted or public PRs needs a server-side shell gate first.
+- **Trusted commenters gate the trigger.** The guard admits only
+  `OWNER`/`MEMBER`/`COLLABORATOR` comment authors, so an untrusted actor cannot start a run.
+  Note this authenticates the **commenter**, not the PR author or the code under review: a
+  trusted member can run the bot over a fork PR's untrusted code, so the reviewed content is
+  untrusted regardless of who triggered it.
+- **What the driver policy does and does not enforce.** The policy accepts the agent's
+  read/inspect tools by attested identity and declines Write/Edit/WebFetch/WebSearch (and any
+  MCP or unknown tool) fail-closed, so the turn never hangs on a human and never
+  blanket-approves a Write/Edit or an MCP/web egress. It does **not** make the agent
+  read-only: `Bash` is permitted (it is the carrier for `git`/`gh` reads), so `gh`,
+  `git push`, and `curl` remain reachable inside the sandbox. The read-only guarantee for
+  untrusted content therefore rests on three controls outside this policy — the
+  trusted-commenter gate, the untrusted-content instruction in the review prompt, and a
+  server-side shell gate enforced against the full command — not on the tool policy blocking
+  egress.
+- **Untrusted PR content is data, not instructions.** The review prompt instructs the agent
+  to treat the diff, file contents, commit messages, and title/body as untrusted material to
+  review, never as directives, and to report an embedded directive as a possible
+  prompt-injection finding.
 - **Dry-run is the default.** With the repo variable unset the run posts nothing, which is
   the safe state for a new wiring.
-- **One session per trigger, always torn down.** `concurrency` cancels a superseded run;
-  the driver traps `SIGTERM`/`SIGINT` and deletes its session on the way out, so a cancelled
-  run leaves nothing live. The verdict comment is a single sticky upsert, so re-runs edit
-  one comment rather than stacking.
-- **Untrusted PR content is data, not instructions.** The diff, file contents, and PR
-  title/body are material to review, never commands to the reviewer.
+- **One session per trigger, torn down best-effort.** `concurrency` cancels a superseded
+  run; the driver traps `SIGTERM`/`SIGINT` and deletes its session on the way out. Under a
+  hard kill (a grace period shorter than teardown, a signal mid-DELETE) a session can still
+  leak, so a server-side session TTL is the backstop. The verdict comment is a single sticky
+  upsert, so re-runs edit one comment rather than stacking.
+- **Credential scope.** The `client_secret` is the only omnigent credential GitHub holds; it
+  is passed as a masked env var (never an input), carries no user identity, and mints a
+  short-lived bearer scoped to `sessions`. The workflow `GITHUB_TOKEN` is `pull-requests:
+  write` / `contents: read`. The sandbox `gh`/`git` token is vended to the runner pod by a
+  rotator, separate from the workflow token, and is currently scoped to a single repo with
+  `contents: read`, `pull_requests: write`, `metadata: read`. `pull_requests: write` means a
+  successfully-injected agent could post or approve — which is exactly why the
+  untrusted-content instruction and the server-side shell gate are load-bearing before real
+  posting is enabled.
+
+### Before enabling real posts
+
+Dry-run is safe to run now. Before setting `SEIDROID_XREVIEW_DRY_RUN=false` on any repo,
+confirm all of:
+
+1. **A successful dry run** has completed on that repo (the composite action and trigger
+   workflow have not yet run in GitHub Actions at all).
+2. **A server-side shell gate is enforced** for the `sei-droid` managed agent (or the agent
+   is restricted to a structured read-only tool set), so a prompt-injection string in a diff
+   cannot drive `gh` / `git push` / `curl`.
+3. **The vended runner token is confirmed minimally scoped** for what review needs, given
+   that an injection would run under it.
+4. **Reviewed content is first-party / trusted**, or item 2 is in place — because the trigger
+   authenticates the commenter, not the code.
+
+Until these hold, keep the bot in dry-run.
 
 ## Status
 

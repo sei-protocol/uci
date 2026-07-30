@@ -10,10 +10,22 @@ inputs:
     description: PR number to review.
   dry_run:
     required: true
-    description: "'true' -> write verdict to the job summary and post NOTHING to the PR."
+    description: >-
+      'true' means the driver posts nothing and writes the verdict to the job
+      summary. This governs the DRIVER's posting only; the agent is separately
+      instructed not to post (see the README security posture). Fail-closed:
+      any value other than the exact string 'false' runs dry.
   github_token:
     required: true
     description: Token used to upsert the verdict comment (the caller's GITHUB_TOKEN).
+  trigger_id:
+    required: false
+    default: ''
+    description: >-
+      Opaque per-trigger id (e.g. the triggering comment id) used as the
+      driver's idempotency / run key, so a re-delivered event adopts the same
+      session instead of driving a fresh turn, and two distinct triggers are
+      two distinct runs. Defaults to a per-PR key when empty.
   omnigent_base_url:
     required: false
     default: http://omnigent.seigent.svc.cluster.local
@@ -75,6 +87,7 @@ runs:
         DRY_RUN: ${{ inputs.dry_run }}
         REPO: ${{ inputs.repo }}
         PR: ${{ inputs.pr_number }}
+        TRIGGER_ID: ${{ inputs.trigger_id }}
       run: |
         set -euo pipefail
         # Create exactly ONE managed sei-droid session, drive it, write the
@@ -82,8 +95,11 @@ runs:
         # SIGTERM/SIGINT so a cancelled run leaves no live session. State
         # lives under RUNNER_TEMP (the generic runner has no /var/lib write).
         # Fail-closed: anything other than the exact opt-in 'false' runs dry.
+        # --trigger-id scopes the run key to this trigger (the comment id) so a
+        # re-fire adopts rather than resurrects; omitted -> a per-PR key.
         args=("$REPO" "$PR" --out verdict.md)
         if [ "$DRY_RUN" != "false" ]; then args+=(--dry-run); fi
+        if [ -n "${TRIGGER_ID:-}" ]; then args+=(--trigger-id "$TRIGGER_ID"); fi
         PYTHONPATH="$GITHUB_ACTION_PATH/.." \
         XREVIEW_STATE_DIR="$RUNNER_TEMP/seidroid-state" \
           "$DRIVER_PYTHON" -m driver "${args[@]}"

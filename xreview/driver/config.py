@@ -63,8 +63,7 @@ class DriverConfig:
     def require_auth(self) -> None:
         if not self.token:
             raise ConfigError(
-                "no API credential: set OMNIGENT_API_TOKEN or "
-                "OMNIGENT_API_TOKEN_FILE"
+                "no API credential: set OMNIGENT_API_TOKEN or OMNIGENT_API_TOKEN_FILE"
             )
 
 

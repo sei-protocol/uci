@@ -70,9 +70,14 @@ class RestClient:
         body = resp.json()
         data = body.get("data", []) if isinstance(body, dict) else []
         for agent in data:
-            if isinstance(agent, dict) and name_or_id in (agent.get("id"), agent.get("name")):
+            if isinstance(agent, dict) and name_or_id in (
+                agent.get("id"),
+                agent.get("name"),
+            ):
                 return str(agent["id"])
-        raise ApiError("GET", "/v1/agents", resp.status_code, f"no agent matching {name_or_id!r}")
+        raise ApiError(
+            "GET", "/v1/agents", resp.status_code, f"no agent matching {name_or_id!r}"
+        )
 
     def create_managed_session(
         self, *, agent_id: str, title: str, labels: dict[str, str] | None = None
@@ -83,6 +88,15 @@ class RestClient:
         mirroring the SDK's create-then-get so the caller always sees a
         complete session dict (the create response may return only an
         id).
+
+        This POST is *not* retried (``retry=False``): a commit-then-
+        retryable status or a dropped connection after the server already
+        committed the session would, on retry, create a second session
+        that the first response's loss hid — orphaning one. Instead the
+        request raises, and the caller reconciles by run-key label
+        (``_create_or_adopt``), adopting the committed session if there is
+        one. Creating exactly one session is the invariant; a retry here
+        would break it.
         """
         body: dict[str, Any] = {
             "agent_id": agent_id,
@@ -91,7 +105,7 @@ class RestClient:
         }
         if labels:
             body["labels"] = labels
-        resp = self._request("POST", "/v1/sessions", json=body)
+        resp = self._request("POST", "/v1/sessions", json=body, retry=False)
         created = resp.json()
         session_id = created.get("session_id") or created.get("id")
         if not session_id:
@@ -113,9 +127,7 @@ class RestClient:
         return [item for item in data if isinstance(item, dict)]
 
     def post_event(self, session_id: str, event: dict[str, Any]) -> dict[str, Any]:
-        resp = self._request(
-            "POST", f"/v1/sessions/{session_id}/events", json=event
-        )
+        resp = self._request("POST", f"/v1/sessions/{session_id}/events", json=event)
         return resp.json()
 
     def resolve_elicitation(
@@ -162,18 +174,27 @@ class RestClient:
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         expect: tuple[int, ...] = (200, 201, 202, 204),
+        retry: bool = True,
     ) -> httpx.Response:
+        # retry=False for a non-idempotent request whose server-side effect
+        # may have committed before the response was lost (e.g. session
+        # create): a retry would duplicate the effect, so the request raises
+        # and the caller reconciles instead.
         attempt = 0
         while True:
             try:
                 resp = self._http.request(method, path, json=json, params=params)
             except httpx.TransportError as exc:
-                if not self._retry_ok(attempt):
+                if not (retry and self._retry_ok(attempt)):
                     raise TransientExhausted(f"{method} {path}: {exc}") from exc
                 self._sleep(attempt)
                 attempt += 1
                 continue
-            if resp.status_code in _RETRYABLE_STATUS and self._retry_ok(attempt):
+            if (
+                resp.status_code in _RETRYABLE_STATUS
+                and retry
+                and self._retry_ok(attempt)
+            ):
                 self._sleep(attempt, resp)
                 attempt += 1
                 continue
@@ -183,8 +204,7 @@ class RestClient:
 
     def _retry_ok(self, attempt: int) -> bool:
         budget_left = (
-            self._deadline is None
-            or self._deadline.remaining() > _BACKOFF_BASE_S
+            self._deadline is None or self._deadline.remaining() > _BACKOFF_BASE_S
         )
         return attempt < self._cfg.max_transient_retries and budget_left
 

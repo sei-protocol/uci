@@ -10,18 +10,27 @@ Read/inspect tools are accepted by identity. ``Bash`` — the carrier for
 ``git``/``gh`` reads — is also accepted by identity: read-vs-write is not
 decidable from the model-chosen, server-truncated command preview, so the
 driver does not parse it (parsing that preview would be both fragile and a
-model-controlled decision surface). The dry-run "post nothing" invariant
-does not rest on this gate: the driver never relays a post, the agent is
-instructed not to post, and the authoritative shell gate runs server-side
-against the full arguments. Every other tool (Write, Edit, MultiEdit,
-NotebookEdit, WebFetch, WebSearch, AskUserQuestion, any MCP or unrecognized
-tool) declines, fail-closed — so the turn never hangs on a human and never
-blanket-approves a mutation or an unconstrained egress.
+model-controlled decision surface). Every other tool (Write, Edit,
+MultiEdit, NotebookEdit, WebFetch, WebSearch, AskUserQuestion, any MCP or
+unrecognized tool) declines, fail-closed — so the turn never hangs on a
+human and never blanket-approves a Write/Edit or an unconstrained MCP/web
+egress.
+
+What this policy does and does not guarantee: it keeps the *driver* from
+relaying a post, and it declines the write/egress *tools* named above. It
+does NOT make the agent read-only — ``Bash`` is permitted and the agent
+holds ``gh``/``git``/``curl`` in its sandbox. So the read-only guarantee for
+untrusted content does not rest on this policy; it rests on three controls
+outside it: the trusted-author trigger gate, the untrusted-content
+instruction in the review prompt, and a server-side shell gate enforced
+against the full command arguments.
 
 Trust scope: accepting ``Bash`` by identity relies on the reviewed PRs
-coming from trusted authors. Pointing this at untrusted/public PRs requires
-the server-side shell gate (or a structured read-only tool set) before the
-Bash permit is safe.
+coming from trusted authors AND on that server-side shell gate actually
+being enforced for this agent. Pointing this at untrusted/public PRs — or
+enabling real posting — is unsafe until the server-side gate (or a
+structured read-only tool set) is in place and verified. See the README
+security posture.
 """
 
 from __future__ import annotations

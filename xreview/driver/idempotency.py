@@ -31,9 +31,7 @@ class Lease:
 
 
 def compute_run_key(repo: str, pr: int, trigger_id: str) -> str:
-    digest = hashlib.sha256(
-        f"{repo}\x00{pr}\x00{trigger_id}".encode()
-    ).hexdigest()
+    digest = hashlib.sha256(f"{repo}\x00{pr}\x00{trigger_id}".encode()).hexdigest()
     return digest[:24]
 
 
