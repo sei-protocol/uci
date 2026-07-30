@@ -21,18 +21,21 @@ sandbox and a minute of wall-clock, so it is opt-in per PR rather than automatic
 
 ## Layout
 
-- `driver/` — the session driver. Creates exactly one managed `sei-droid` session, drives
-  it through a review turn, auto-resolves the agent's permission prompts against a
-  read-only policy, extracts the verdict, and tears the session down. Speaks the omnigent
-  REST API directly over `httpx`. `driver/tests/selftest.py` covers the settle/nudge and
-  verdict-parsing logic with a scripted fake client
+- `.github/workflows/seidroid-xreview.yml` — the **reusable workflow** this feature
+  publishes (alongside `ai-review`/`ai-assistant`). On a `seidroid xreview` comment it runs
+  the trusted-commenter guard, fetches the driver at the caller's `uci-ref`, mints the
+  omnigent bearer, drives the review, and posts the verdict (or, in dry-run, writes it to the
+  job summary). Callers reach it with `uses:`.
+- `driver/` — the session driver the reusable workflow runs. Creates exactly one managed
+  `sei-droid` session, drives it through a review turn, auto-resolves the agent's permission
+  prompts against a read-only policy, extracts the verdict, and tears the session down.
+  Speaks the omnigent REST API directly over `httpx`. `driver/tests/selftest.py` covers the
+  settle/nudge and verdict-parsing logic with a scripted fake client
   (`python .github/seidroid/xreview/driver/tests/selftest.py`).
-- `tools/action.yml` — the composite action this repo publishes. Mints the omnigent bearer,
-  runs the driver, and (outside dry-run) upserts one sticky verdict comment.
-- `tools/seidroid-xreview.yml` — the trigger workflow. It is a template: copy it into the
-  **reviewed** repo at `.github/workflows/seidroid-xreview.yml`. An `issue_comment` workflow
-  only fires from the repo's default branch, so the trigger has to live in each reviewed
-  repo; this repo owns the reusable action and the driver.
+- `tools/seidroid-xreview.yml` — the **caller template**. Copy it into the reviewed repo at
+  `.github/workflows/seidroid-xreview.yml` (an `issue_comment` workflow only fires from the
+  default branch, so the thin caller must live in each reviewed repo); it wires the trigger
+  and `uses:` the reusable workflow at a pinned ref.
 
 ## How a run works
 
@@ -40,11 +43,12 @@ sandbox and a minute of wall-clock, so it is opt-in per PR rather than automatic
 2. The trigger workflow's `guard` job (hosted runner, no secrets) checks the comment author
    is `OWNER`/`MEMBER`/`COLLABORATOR` and that the command line is exactly `seidroid xreview`
    (optionally `--dry-run`), then resolves the dry-run flag.
-3. The `xreview` job runs on the `uci-default` org ARC scale set, in-cluster. It mints an
-   omnigent bearer with the client-credentials grant and hands it to the composite action.
-4. The action creates one managed `sei-droid` session, drives the review, and writes the
-   verdict to a file.
-5. In real-post mode the action upserts a single `<!-- seidroid-xreview -->` comment on the
+3. The reusable workflow's `xreview` job runs on the `uci-default` org ARC scale set,
+   in-cluster. It fetches the driver at `uci-ref`, mints an omnigent bearer with the
+   client-credentials grant, and runs the driver.
+4. The driver creates one managed `sei-droid` session, drives the review, and writes the
+   verdict to a file only when a real verdict is produced.
+5. In real-post mode the workflow upserts a single `<!-- seidroid-xreview -->` comment on the
    PR; in dry-run it writes the verdict to the job summary and posts nothing. Either way the
    session is deleted on exit, including on cancellation.
 
@@ -52,7 +56,7 @@ sandbox and a minute of wall-clock, so it is opt-in per PR rather than automatic
 
 omnigent exposes an OAuth2 client-credentials grant at `POST /oauth/token`: a machine
 `client_id`/`client_secret` pair, no user, exchanged for a short-lived Bearer token scoped
-to `sessions`. The action mints the bearer at the start of each run over HTTP Basic
+to `sessions`. The reusable workflow mints the bearer at the start of each run over HTTP Basic
 (`client_id:client_secret`) with `grant_type=client_credentials`, masks it, and passes it to
 the driver as `OMNIGENT_API_TOKEN`. A non-200 or a response without an `access_token` fails
 the run loudly rather than falling through to an anonymous request.
@@ -74,18 +78,17 @@ without that scale set cannot schedule the `xreview` job, and the run never star
 
 1. Copy `tools/seidroid-xreview.yml` to the reviewed repo's
    `.github/workflows/seidroid-xreview.yml` on its default branch.
-2. Replace `PIN_ME_TO_A_SHA` in the `uses: sei-protocol/uci/.github/seidroid/xreview/tools@...` line with a
-   full commit SHA of this repo. Pin to a SHA, never a moving tag.
-3. Set the `OMNIGENT_M2M_CLIENT_SECRET` repository (or environment) secret to the
-   client-credentials secret. It is required even for a dry run: the action always mints a
-   bearer; dry-run controls only whether the verdict is posted. `OMNIGENT_M2M_CLIENT_ID`
-   defaults to `sei-droid` and is not a secret; to override it, add it to the **job-level**
-   `env:` block in the trigger workflow (step-level env does not reach the composite action).
+2. Pin both refs in it — the `uses: sei-protocol/uci/.github/workflows/seidroid-xreview.yml@...`
+   line and the `uci-ref` input — to the same uci release tag or commit SHA (a fixed ref,
+   never a moving tag). Bump both to adopt a new xreview release.
+3. Set the `OMNIGENT_M2M_CLIENT_SECRET` repository (or organization) secret to the
+   client-credentials secret; `secrets: inherit` in the caller passes it through. It is
+   required even for a dry run: the workflow always mints a bearer; dry-run controls only
+   whether the verdict is posted.
 4. Leave `vars.SEIDROID_XREVIEW_DRY_RUN` unset (or `true`) until you have watched a real run.
-   Setting it to `false` enables posting — but the trigger workflow and composite action have
-   not yet run in GitHub Actions, so your first `seidroid xreview` comment is their first real
-   test, and enabling posts grants the sandbox agent a write-capable path to the PR. Read
-   "Before enabling real posts" below and keep it unset until every item there holds.
+   Setting it to `false` enables posting — and enabling posts grants the sandbox agent a
+   write-capable path to the PR. Read "Before enabling real posts" below and keep it unset
+   until every item there holds.
 
 ## Security posture
 
@@ -136,9 +139,8 @@ auto-accepted `Bash` tool **even in dry-run**. So the preconditions below gate t
 (a) setting `SEIDROID_XREVIEW_DRY_RUN=false` to enable real posts, and (b) running the bot at
 all (even dry-run) over untrusted content. Confirm before either:
 
-1. **A successful dry run over first-party content** has completed on that repo (the composite
-   action and trigger workflow have not yet run in GitHub Actions at all) — required before
-   enabling real posts.
+1. **A successful dry run over first-party content** has completed on that repo — required
+   before enabling real posts.
 2. **A server-side shell gate is enforced** for the `sei-droid` managed agent (or the agent is
    restricted to a structured read-only tool set), so a prompt-injection string cannot drive
    `gh` / `git push` / `curl`.
@@ -155,10 +157,10 @@ and keep the bot off untrusted content — until the items above hold.
 
 The driver has been exercised end-to-end against live PRs: mint, session create, sandbox
 launch, the agent reading the PR through the credential bridge, a structured verdict, and
-teardown. The **trigger workflow and composite action have not yet run in GitHub Actions** —
-the first `seidroid xreview` comment on a wired repo is their first real test. Keep
-`SEIDROID_XREVIEW_DRY_RUN` unset for that first run and read the job summary before enabling
-posts.
+teardown. The **reusable workflow and its thin caller** are being wired into their first repo
+now; the first `seidroid xreview` comment there is the comment-trigger path's first real test.
+Keep `SEIDROID_XREVIEW_DRY_RUN` unset for that first run and read the job summary before
+enabling posts.
 
 Known gaps for a follow-up: the verdict currently posts as `github-actions[bot]` rather than
 `seidroid[bot]` (posting via the app token, as `ai-review` does, is a later change); and the
