@@ -151,9 +151,11 @@ admitted it, the `xreview` job scheduled on `uci-default`, and the driver checke
 caller's `uci-ref`. The steps from the bearer mint onward have not yet run on that runner,
 so treat the in-cluster half of the path as unproven until one run posts a verdict.
 
-Expect the gaps that remain to be runner-image ones rather than logic ones. The in-cluster
-image is not the hosted image the driver was developed against, and the mint and post steps
-assume `curl` and `gh` are on it, which is not yet confirmed the way the interpreter now is.
+The gaps that surfaced there were runner-image ones rather than logic ones, because the
+in-cluster image is a minimal runner rather than the hosted image the driver was developed
+against. It carries `curl`, `jq` and `git`, and a `python3` with no venv module; it does not
+carry the `gh` CLI. So the workflow now brings its own interpreter and posts through the
+API client `github-script` provides, and depends on the image only for `curl`.
 
 Known gaps for a follow-up: the verdict currently posts as `github-actions[bot]` rather than
 `seidroid[bot]` (posting via the seidroid app token is a later change); and the

@@ -168,9 +168,8 @@ jobs:
           set -euo pipefail
           # Create exactly ONE managed sei-droid session, drive it, write the verdict
           # to verdict.md ONLY on a real verdict (no placeholder), and DELETE the
-          # session on exit AND on SIGTERM/SIGINT. Fail-closed: anything other than the
-          # exact opt-in 'false' runs dry. --trigger-id scopes the run key to this
-          # comment so a re-fire adopts rather than resurrects.
+          # session on exit AND on SIGTERM/SIGINT. --trigger-id scopes the run key to
+          # this comment so a re-fire adopts rather than resurrects.
           args=("$REPO" "$PR" --out verdict.md)
           if [ -n "${TRIGGER_ID:-}" ]; then args+=(--trigger-id "$TRIGGER_ID"); fi
           set +e
@@ -196,22 +195,36 @@ jobs:
         # Post only when a real verdict was produced. Keying on verdict_produced, not
         # the exit code, so a teardown-only failure still posts a valid verdict and a
         # no-verdict run never upserts a placeholder.
+        #
+        # Posted through github-script rather than the gh CLI because the in-cluster
+        # runner image does not carry gh, and because the API client it hands the script
+        # is the same token this job already holds. The repo comes from the run context
+        # and the pr number from the guard's output, so neither is interpolated into a
+        # shell command.
         if: ${{ steps.drive.outputs.verdict_produced == 'true' }}
-        shell: bash
+        uses: actions/github-script@v9
         env:
-          GH_TOKEN: ${{ github.token }}
           MARKER: "<!-- seidroid-xreview -->"
-          REPO: ${{ github.repository }}
           PR: ${{ needs.guard.outputs.pr_number }}
-        run: |
-          set -euo pipefail
-          body="$MARKER"$'\n'"$(cat verdict.md)"
-          # One bot comment per PR: find by marker -> PATCH, else POST. repo/pr from env,
-          # not template-interpolated into the script.
-          id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
-          else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
-          fi
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = process.env.MARKER;
+            const issue_number = Number(process.env.PR);
+            const body = `${marker}\n${fs.readFileSync('verdict.md', 'utf8')}`;
+            // One bot comment per PR: find this bot's marker and edit it, else create.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body?.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number, body });
+            }
