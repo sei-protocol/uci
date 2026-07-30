@@ -17,7 +17,7 @@ run-name: UCI / AI Review
 # `pull_request` trigger types. Those events run this workflow only when the changed label
 # is the configured skip label; changes to other labels are ignored.
 #
-# Call it from a `pull_request` event (see .github/seidroid/README.md). It refuses to run
+# Call it from a `pull_request` event (see .github/seidroid/auto-review/README.md). It refuses to run
 # under `pull_request_target`.
 on:
   workflow_call:
@@ -142,7 +142,7 @@ jobs:
           repository: sei-protocol/uci
           ref: ${{ inputs.uci-ref }}
           path: .uci
-          sparse-checkout: .github/seidroid
+          sparse-checkout: .github/seidroid/auto-review
           sparse-checkout-cone-mode: false
           persist-credentials: false
           token: ${{ steps.app-token.outputs.token || github.token }}
@@ -153,7 +153,7 @@ jobs:
           EXTRA: ${{ inputs.extra-instructions }}
         run: |
           assemble() {
-            cat ".uci/.github/seidroid/$1"
+            cat ".uci/.github/seidroid/auto-review/$1"
             if [ -n "$EXTRA" ]; then
               printf '\n\n## Additional instructions from the caller\n\n%s\n' "$EXTRA"
             fi
