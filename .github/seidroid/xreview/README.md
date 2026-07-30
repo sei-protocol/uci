@@ -4,28 +4,20 @@
 pull request and the `sei-droid` agent runs inside a managed omnigent Kubernetes sandbox,
 reads the PR through a real `git`/`gh` toolchain, and returns one structured verdict.
 
-It is a third `seidroid` capability alongside the two in `.github/seidroid/`, and it does
-not replace them:
+Unlike a diff-only reviewer, the agent drives a full session with a credentialed toolchain,
+so it can run the tests, reproduce a claim, or grep the wider codebase before it decides.
+That depth costs a live sandbox and a minute of wall-clock, so xreview is opt-in per PR —
+triggered by the comment — rather than run on every push.
 
-| Capability | Trigger | Engine | Best at |
-|---|---|---|---|
-| `ai-review` | every `pull_request` | Codex ∥ Cursor → Claude, in the Actions runner | fast, automatic, diff-scoped review on every push |
-| `ai-assistant` | `@seidroid` mention | Claude in the Actions runner | conversational answers in a PR thread |
-| **`xreview`** | `seidroid xreview` comment | the `sei-droid` agent in a managed omnigent sandbox | deep, on-demand review that can build, test, and inspect the tree, not just read the diff |
-
-The difference that matters is the engine. `ai-review` and `ai-assistant` pass the diff to
-a model from inside the GitHub Actions runner. `xreview` drives a full agent session in an
-omnigent-managed sandbox with a credentialed toolchain, so the reviewer can run the tests,
-reproduce a claim, or grep the wider codebase before it decides. That depth costs a live
-sandbox and a minute of wall-clock, so it is opt-in per PR rather than automatic.
+For how xreview sits alongside the other `seidroid` capabilities, see the
+[seidroid index](../README.md).
 
 ## Layout
 
 - `.github/workflows/seidroid-xreview.yml` — the **reusable workflow** this feature
-  publishes (alongside `ai-review`/`ai-assistant`). On a `seidroid xreview` comment it runs
-  the trusted-commenter guard, fetches the driver at the caller's `uci-ref`, mints the
-  omnigent bearer, drives the review, and posts the verdict
-  job summary). Callers reach it with `uses:`.
+  publishes. On a `seidroid xreview` comment it runs the trusted-commenter guard, fetches the
+  driver at the caller's `uci-ref`, mints the omnigent bearer, drives the review, and posts
+  the verdict as one sticky PR comment. Callers reach it with `uses:`.
 - `driver/` — the session driver the reusable workflow runs. Creates exactly one managed
   `sei-droid` session, drives it through a review turn, auto-resolves the agent's permission
   prompts against a read-only policy, extracts the verdict, and tears the session down.
@@ -157,5 +149,5 @@ teardown. The **reusable workflow and its thin caller** are being wired into the
 now; the first `seidroid xreview` comment there is the comment-trigger path's first real test.
 
 Known gaps for a follow-up: the verdict currently posts as `github-actions[bot]` rather than
-`seidroid[bot]` (posting via the app token, as `ai-review` does, is a later change); and the
+`seidroid[bot]` (posting via the seidroid app token is a later change); and the
 driver's Python dependency (`httpx`) is installed at run time rather than hash-pinned.
