@@ -1,0 +1,5 @@
+# Python bytecode + tool caches — the driver is run, not packaged.
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
