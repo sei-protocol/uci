@@ -84,6 +84,10 @@ jobs:
     # The reviewed repo's runner label. Org ARC scale set by default, in-cluster, so it
     # reaches omnigent over the ClusterIP Service and mints its bearer there.
     runs-on: ${{ inputs.runs-on }}
+    # A stalled fetch, download, pip resolve, or mint would otherwise hold a runner (and a
+    # live credential) until the six-hour default. The driver bounds its own run; this
+    # bounds everything around it.
+    timeout-minutes: 30
     permissions:
       pull-requests: write   # upsert the one sticky verdict comment
       contents: read         # read PR metadata
@@ -109,6 +113,7 @@ jobs:
       # the venv below cannot bootstrap without ensurepip. This also fixes the version
       # the driver runs under instead of inheriting whatever the image happens to carry.
       - name: Set up Python
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -116,11 +121,14 @@ jobs:
       - name: Set up driver runtime
         id: runtime
         shell: bash
+        env:
+          SETUP_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
           # A pinned venv keeps the httpx version deterministic regardless of the image.
           venv="$RUNNER_TEMP/seidroid-venv"
-          python3 -m venv "$venv"
+          # The interpreter the setup step resolved, not whatever PATH offers.
+          "$SETUP_PYTHON" -m venv "$venv"
           "$venv/bin/python" -m pip install --disable-pip-version-check --no-input --quiet "httpx==0.27.2"
           echo "python=$venv/bin/python" >> "$GITHUB_OUTPUT"
 
@@ -136,6 +144,7 @@ jobs:
           client_id="${OMNIGENT_M2M_CLIENT_ID:-sei-droid}"
           : "${OMNIGENT_M2M_CLIENT_SECRET:?OMNIGENT_M2M_CLIENT_SECRET not provided by the caller}"
           resp="$(curl -sS -w $'\n%{http_code}' \
+            --connect-timeout 5 --max-time 30 \
             --config <(printf 'user = "%s:%s"\n' "$client_id" "$OMNIGENT_M2M_CLIENT_SECRET") \
             -d grant_type=client_credentials \
             "$BASE_URL/oauth/token")" || { echo "omnigent /oauth/token request failed" >&2; exit 1; }
@@ -180,7 +189,10 @@ jobs:
           # Downstream gates on whether a verdict was PRODUCED (verdict.md non-empty),
           # not on the exit code: a teardown-only failure still publishes, and a
           # no-verdict run never posts a placeholder.
-          if [ -s verdict.md ]; then
+          # Non-whitespace rather than non-empty: a final agent message with no text
+          # block writes a lone newline, which -s admits and which would post a comment
+          # carrying nothing but the marker.
+          if grep -q '[^[:space:]]' verdict.md 2>/dev/null; then
             echo "verdict_produced=true" >> "$GITHUB_OUTPUT"
             if [ "$rc" -ne 0 ]; then
               echo "::warning::driver exited $rc but produced a verdict (e.g. a teardown leak); see logs"
@@ -207,24 +219,47 @@ jobs:
           MARKER: "<!-- seidroid-xreview -->"
           PR: ${{ needs.guard.outputs.pr_number }}
         with:
+          # A 429 or 5xx on this call would otherwise discard a completed review; the
+          # retry set excludes 4xx other than 429, so a permission or validation error
+          # still fails fast.
+          retries: 3
           script: |
             const fs = require('fs');
+            const path = require('path');
             const marker = process.env.MARKER;
             const issue_number = Number(process.env.PR);
-            const body = `${marker}\n${fs.readFileSync('verdict.md', 'utf8')}`;
-            // One bot comment per PR: find this bot's marker and edit it, else create.
+            // Anchored to the workspace rather than the process cwd, which a later
+            // working-directory default or a step reorder could move out from under this.
+            const verdict = path.join(process.env.GITHUB_WORKSPACE, 'verdict.md');
+            const body = `${marker}\n${fs.readFileSync(verdict, 'utf8')}`;
+
             const comments = await github.paginate(github.rest.issues.listComments, {
               ...context.repo,
               issue_number,
               per_page: 100,
             });
-            const existing = comments.find((c) => c.body?.startsWith(marker));
+            // One bot comment per PR: edit the marked one, else create it. The author has
+            // to be a bot as well as the marker matching. Anyone who can comment on the PR
+            // can write the marker, including the untrusted PR author, whom the trigger
+            // guard does not cover because it gates who may run the bot rather than whose
+            // code is reviewed. Matching on the marker alone would let such a comment
+            // either capture the verdict slot, since this token can edit it, or fail the
+            // step and suppress the review.
+            const existing = comments.find(
+              (c) => c.body?.startsWith(marker) && c.user?.type === 'Bot',
+            );
             if (existing) {
               await github.rest.issues.updateComment({
                 ...context.repo,
                 comment_id: existing.id,
                 body,
               });
+              core.info(`updated verdict comment ${existing.id} by ${existing.user?.login}`);
             } else {
-              await github.rest.issues.createComment({ ...context.repo, issue_number, body });
+              const created = await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number,
+                body,
+              });
+              core.info(`created verdict comment ${created.data.id}`);
             }

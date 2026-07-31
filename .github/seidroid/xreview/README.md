@@ -153,9 +153,14 @@ so treat the in-cluster half of the path as unproven until one run posts a verdi
 
 The gaps that surfaced there were runner-image ones rather than logic ones, because the
 in-cluster image is a minimal runner rather than the hosted image the driver was developed
-against. It carries `curl`, `jq` and `git`, and a `python3` with no venv module; it does not
-carry the `gh` CLI. So the workflow now brings its own interpreter and posts through the
-API client `github-script` provides, and depends on the image only for `curl`.
+against. It carries `curl` and `git`, and a `python3` with no venv module; it does not carry
+the `gh` CLI. So the workflow now brings its own interpreter and posts through the API
+client `github-script` provides.
+
+What it still expects from the image is `curl`, for the bearer mint, `git`, for the driver
+checkout, and `bash` plus `tar` and the usual coreutils, which the interpreter setup needs
+to unpack and install what it downloads. The node the three actions run on comes from the
+runner rather than the image.
 
 Known gaps for a follow-up: the verdict currently posts as `github-actions[bot]` rather than
 `seidroid[bot]` (posting via the seidroid app token is a later change); and the
