@@ -1,0 +1,168 @@
+name: seidroid xreview
+run-name: UCI / seidroid xreview
+
+# Reusable, comment-triggered agentic PR review. A thin caller in the reviewed repo
+# wires the issue_comment trigger and calls this with `uses:`. Flow: comment
+# `seidroid xreview` on a PR -> trusted-commenter gate -> drive one managed sei-droid
+# omnigent session over the PR -> post one sticky verdict.
+#
+# The review itself is sei-agent-driver, installed at `driver-version` from
+# sei-protocol/sei-internal-skills, which is public. A caller updates by bumping the
+# pinned `uses:` ref; the driver version travels with it, so one ref fixes both the
+# workflow and the binary it runs.
+
+on:
+  workflow_call:
+    inputs:
+      driver-version:
+        description: "sei-agent-driver release to install. Bump with the pinned uses: ref."
+        required: false
+        type: string
+        default: 'v0.1.0'
+      runs-on:
+        description: "Runner label for the review job."
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      omnigent-base-url:
+        description: "omnigent base URL. Reached over https, so no in-cluster runner is needed."
+        required: false
+        type: string
+        default: 'https://seigent.dev.platform.sei.io'
+    secrets:
+      OMNIGENT_M2M_CLIENT_SECRET:
+        description: "omnigent client-credentials secret. The driver exchanges it for a session bearer."
+        required: true
+
+permissions: {}
+
+jobs:
+  guard:
+    # Cheap allowlist and command parse on a hosted runner, no secrets, before any
+    # review work spins up. The author_association gate is the trust boundary: only
+    # OWNER/MEMBER/COLLABORATOR can fire it, so an untrusted PR author cannot.
+    name: Guard
+    runs-on: ubuntu-latest
+    permissions: {}
+    if: >-
+      ${{ github.event.issue.pull_request != null &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) }}
+    outputs:
+      should_run: ${{ steps.parse.outputs.should_run }}
+      pr_number: ${{ steps.parse.outputs.pr_number }}
+      comment_id: ${{ steps.parse.outputs.comment_id }}
+    steps:
+      - id: parse
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          cmd="$(printf '%s' "$BODY" | tr -d '\r')"
+          # Require a LINE reading exactly `seidroid xreview`. Anchoring the match to a
+          # whole line is what keeps a comment that merely quotes or discusses the
+          # command from triggering a review.
+          cmdline="$(printf '%s\n' "$cmd" | grep -m1 -E '^[[:space:]]*seidroid[[:space:]]+xreview[[:space:]]*$' || true)"
+          if [ -z "$cmdline" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The comment id becomes the driver's per-trigger id, so a re-delivered
+          # comment adopts the same session rather than driving a new turn.
+          {
+            echo "should_run=true"
+            echo "pr_number=${{ github.event.issue.number }}"
+            echo "comment_id=${{ github.event.comment.id }}"
+          } >> "$GITHUB_OUTPUT"
+
+  xreview:
+    name: Review
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true'
+    # Exactly one review per PR: a newer `seidroid xreview` cancels an in-flight one,
+    # so there are never two posters. Job-level, so the group is entered only when a
+    # real command runs.
+    concurrency:
+      group: seidroid-xreview-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    runs-on: ${{ inputs.runs-on }}
+    # Above the driver's own run deadline, so a slow-but-valid review is never
+    # hard-killed mid-turn, which would end it with no annotation saying why.
+    timeout-minutes: 40
+    permissions:
+      pull-requests: write   # upsert the one sticky verdict comment
+      contents: read         # read PR metadata
+    env:
+      # Installed here rather than left to the runner image's GOPATH, so both steps
+      # name one path and neither shells out to `go env`.
+      GOBIN: ${{ github.workspace }}/.driver-bin
+    steps:
+      # Pinned rather than taking the runner image's Go, which moves under us and
+      # only has to satisfy the module's floor by luck.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # Public module, so no credential and no GOPRIVATE. The version reference is
+      # plain: the driver is a nested module, and its path-prefixed tag is what
+      # resolution consumes rather than what is typed here.
+      - name: Install the driver
+        env:
+          DRIVER_VERSION: ${{ inputs.driver-version }}
+        run: |
+          set -euo pipefail
+          go install "github.com/sei-protocol/sei-internal-skills/sei-agent-driver/cmd/sei-agent-driver@${DRIVER_VERSION}"
+          "$GOBIN/sei-agent-driver" --version
+
+      - name: Review
+        id: drive
+        env:
+          OMNIGENT_BASE_URL: ${{ inputs.omnigent-base-url }}
+          OMNIGENT_M2M_CLIENT_ID: sei-droid
+          OMNIGENT_M2M_CLIENT_SECRET: ${{ secrets.OMNIGENT_M2M_CLIENT_SECRET }}
+          # The driver declines every permission prompt it is not told to accept, so
+          # without this the agent is refused the shell it needs to read the diff and
+          # reviews nothing. Matched on tool_name, not policy_name: the deployment
+          # sends one policy name for every native request, so allowing that would
+          # accept every tool call the agent asks for.
+          XREVIEW_ALLOW_TOOLS: Bash,Read
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
+          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+        run: |
+          set -uo pipefail
+          "$GOBIN/sei-agent-driver" xreview "$REPO" "$PR" \
+            --out verdict.md --trigger-id "$TRIGGER_ID"
+          rc=$?
+          # Gates on whether a verdict was PRODUCED, not on the exit code: a
+          # teardown-only failure still publishes, and a no-verdict run never posts a
+          # placeholder.
+          if [ -s verdict.md ]; then
+            echo "verdict_produced=true" >> "$GITHUB_OUTPUT"
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::driver exited $rc but produced a verdict; see the logs"
+            fi
+          else
+            echo "verdict_produced=false" >> "$GITHUB_OUTPUT"
+            echo "::error::driver produced no verdict (exit $rc)"
+            exit "$rc"
+          fi
+
+      - name: Post verdict (sticky upsert)
+        if: ${{ steps.drive.outputs.verdict_produced == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARKER: "<!-- seidroid-xreview -->"
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          body="$MARKER"$'\n'"$(cat verdict.md)"
+          # One bot comment per PR: find by marker, then PATCH, else POST.
+          id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
+          fi
