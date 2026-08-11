@@ -25,9 +25,14 @@ seidroid reviews and replies to their inline comments. On a re-review:
 
 Each previous inline thread may include a `thread_id` and its resolved/unresolved state.
 For every unresolved thread whose finding the current changes fully address, add that exact
-ID to `resolved_thread_ids`. Do not include already-resolved threads, threads without an ID,
-or threads whose finding is still present. The workflow validates these IDs and marks the
-matching GitHub threads resolved after posting the new review.
+ID to `resolved_thread_ids`.
+
+If an unresolved finding is still present, report it again as a current `inline_comments`
+entry and put its old thread ID in that entry's `supersedes_thread_ids`. This replaces the
+stale thread with the new comment instead of leaving two unresolved copies. Do not put
+already-resolved threads or threads without an ID in either field. The workflow validates
+all IDs and resolves old threads only after posting the new review (and, for superseded
+threads, only when the replacement was successfully posted inline).
 
 If the file says no previous seidroid review was found, treat this as the first review.
 
@@ -65,7 +70,10 @@ with a brief note. Be concise and specific.
 - Only anchor to a line that actually appears in the PR diff. If you are not confident a
   finding maps to a changed line, do NOT force it — put it in bucket B instead.
 - `severity`: `"blocker"`, `"suggestion"`, or `"nit"`.
-- `body`: concise comment text.
+- `body`: concise comment text. Do not include a severity prefix such as `[blocker]`; the
+  workflow adds exactly one prefix from `severity`.
+- `supersedes_thread_ids`: exact IDs of unresolved previous threads that this new inline
+  comment replaces. Use `[]` for a new finding.
 
 **B) NOT tied to a single line** (cross-cutting, missing tests, design, general
 observations) → `blockers` (must-fix) or `non_blockers` (suggestions/nits). Each entry is

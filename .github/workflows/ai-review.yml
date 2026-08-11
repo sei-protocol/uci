@@ -698,7 +698,7 @@ jobs:
           claude_args: |
             --allowedTools "Read,Bash(gh pr diff:*),Bash(gh pr view:*)"
             ${{ inputs.claude-model != '' && format('--model {0}', inputs.claude-model) || '' }}
-            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","items":{"type":"string"},"description":"Non-blocking suggestions or nits NOT tied to a specific line. Empty array if none."},"resolved_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid inline findings that the current changes address. Empty array if none."},"inline_comments":{"type":"array","description":"Findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text"}},"required":["path","line","body"]}}},"required":["verdict","summary","blockers","non_blockers","resolved_thread_ids","inline_comments"]}'
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","items":{"type":"string"},"description":"Non-blocking suggestions or nits NOT tied to a specific line. Empty array if none."},"resolved_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid inline findings that the current changes address. Empty array if none."},"inline_comments":{"type":"array","description":"Findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text without a severity prefix."},"supersedes_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid findings replaced by this new inline comment. Empty array for a new finding."}},"required":["path","line","severity","body","supersedes_thread_ids"]}}},"required":["verdict","summary","blockers","non_blockers","resolved_thread_ids","inline_comments"]}'
 
       - name: Post the combined review and report verdict as a check run
         # Run on review success AND failure (to report the verdict), but NOT when the run
@@ -743,6 +743,10 @@ jobs:
               const v = String(s || "suggestion").toLowerCase();
               return v === "blocker" ? "**[blocker]** " : v === "nit" ? "**[nit]** " : "**[suggestion]** ";
             };
+            const stripSeverityTags = (body) => String(body || "").replace(
+              /^(?:\s*(?:\*\*)?\[(?:blocker|suggestion|nit)\](?:\*\*)?\s*)+/i,
+              "",
+            ).trim();
 
             // ---- 2) Build a commentable-line index from the actual PR diff ----
             const valid = { RIGHT: {}, LEFT: {} };
@@ -774,10 +778,17 @@ jobs:
               const lineNum = Number.isInteger(c?.line) ? c.line : parseInt(c?.line, 10);
               const side = String(c?.side ?? "RIGHT").toUpperCase() === "LEFT" ? "LEFT" : "RIGHT";
               const severity = String(c?.severity ?? "suggestion").toLowerCase();
-              const body = String(c?.body ?? "").trim();
+              const body = stripSeverityTags(c?.body);
+              const supersedesThreadIds = [...new Set(
+                Array.isArray(c?.supersedes_thread_ids)
+                  ? c.supersedes_thread_ids.map(s => String(s).trim()).filter(Boolean)
+                  : []
+              )];
               if (!path || !body) continue;
               const anchorable = Number.isInteger(lineNum) && valid[side][path]?.has(lineNum);
-              if (anchorable) reviewComments.push({ path, line: lineNum, side, severity, body });
+              if (anchorable) reviewComments.push({
+                path, line: lineNum, side, severity, body, supersedesThreadIds,
+              });
               else orphaned.push({ path, line: Number.isInteger(lineNum) ? lineNum : null, severity, body });
             }
             const inlineBlockers = reviewComments.filter(c => c.severity === "blocker").length;
@@ -826,6 +837,7 @@ jobs:
 
             // ---- 6) Post the review, inline -> body-only -> COMMENT fallback --
             let postedReviewId = null;
+            let postedInlineComments = false;
             if (number && sha) {
               const mkComments = () => reviewComments.map(c => ({
                 path: c.path, line: c.line, side: c.side, body: tag(c.severity) + c.body,
@@ -838,6 +850,7 @@ jobs:
               try {
                 const response = await post(reviewEvent, true, body);
                 postedReviewId = response.data.id;
+                postedInlineComments = reviewComments.length > 0;
               } catch (e1) {
                 core.warning(`createReview (inline, ${reviewEvent}) failed: ${e1.status} ${e1.message}. Retrying body-only.`);
                 let bodyOnly = body;
@@ -860,8 +873,16 @@ jobs:
               }
             }
 
-            // ---- 7) Resolve prior inline findings fixed by the current changes -
-            if (number && postedReviewId && haveOutput && resolvedThreadIds.length) {
+            // ---- 7) Resolve prior inline findings fixed or superseded here ----
+            const threadIdsToResolve = new Set(resolvedThreadIds);
+            if (postedInlineComments) {
+              for (const comment of reviewComments) {
+                for (const threadId of comment.supersedesThreadIds) {
+                  threadIdsToResolve.add(threadId);
+                }
+              }
+            }
+            if (number && postedReviewId && haveOutput && threadIdsToResolve.size) {
               try {
                 const reviews = await github.paginate(github.rest.pulls.listReviews, {
                   owner: context.repo.owner, repo: context.repo.repo,
@@ -918,9 +939,9 @@ jobs:
                     : null;
                 } while (cursor);
 
-                for (const threadId of resolvedThreadIds) {
+                for (const threadId of threadIdsToResolve) {
                   if (!eligibleThreadIds.has(threadId)) {
-                    core.warning(`Ignoring ineligible resolved_thread_id: ${threadId}`);
+                    core.warning(`Ignoring ineligible review thread ID: ${threadId}`);
                     continue;
                   }
                   await github.graphql(
@@ -931,10 +952,10 @@ jobs:
                     }`,
                     { threadId },
                   );
-                  core.info(`Resolved addressed review thread ${threadId}.`);
+                  core.info(`Resolved addressed or superseded review thread ${threadId}.`);
                 }
               } catch (e) {
-                core.warning(`Could not resolve addressed review threads: ${e.message}`);
+                core.warning(`Could not resolve addressed or superseded review threads: ${e.message}`);
               }
             }
 
