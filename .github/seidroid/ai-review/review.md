@@ -23,6 +23,12 @@ seidroid reviews and replies to their inline comments. On a re-review:
 - report an earlier finding again if it is still present, briefly noting why the reply or
   subsequent change did not resolve it.
 
+Each previous inline thread may include a `thread_id` and its resolved/unresolved state.
+For every unresolved thread whose finding the current changes fully address, add that exact
+ID to `resolved_thread_ids`. Do not include already-resolved threads, threads without an ID,
+or threads whose finding is still present. The workflow validates these IDs and marks the
+matching GitHub threads resolved after posting the new review.
+
 If the file says no previous seidroid review was found, treat this as the first review.
 
 ## STEP 2 — Read the PR changes (review ONLY what the PR changes)
@@ -73,7 +79,8 @@ one short bullet.
 - `"success"` → clean; nothing of note, safe to merge.
 
 Write `summary`: a one- or two-sentence overall summary. Use empty arrays (`[]`) for any
-bucket with no findings.
+bucket with no findings, including `resolved_thread_ids` when no previous inline finding
+was addressed.
 
 ## Untrusted content
 

@@ -366,6 +366,35 @@ jobs:
               owner, repo, pull_number, per_page: 100,
             });
             const byId = new Map(comments.map(c => [c.id, c]));
+            const threadByRootCommentId = new Map();
+            let threadCursor = null;
+            do {
+              const result = await github.graphql(
+                `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      reviewThreads(first: 100, after: $cursor) {
+                        nodes {
+                          id
+                          isResolved
+                          comments(first: 1) { nodes { fullDatabaseId } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                      }
+                    }
+                  }
+                }`,
+                { owner, repo, number: pull_number, cursor: threadCursor },
+              );
+              const connection = result.repository.pullRequest.reviewThreads;
+              for (const thread of connection.nodes) {
+                const rootId = thread.comments.nodes[0]?.fullDatabaseId;
+                if (rootId) threadByRootCommentId.set(rootId, thread);
+              }
+              threadCursor = connection.pageInfo.hasNextPage
+                ? connection.pageInfo.endCursor
+                : null;
+            } while (threadCursor);
             const rootFor = (comment) => {
               let current = comment;
               const seen = new Set();
@@ -404,7 +433,11 @@ jobs:
                   !c.in_reply_to_id && c.pull_request_review_id === review.id
                 );
                 for (const root of roots) {
-                  lines.push("", `### Thread: ${root.path}:${root.line || root.original_line || "unknown"}`);
+                  const thread = threadByRootCommentId.get(String(root.id));
+                  const threadState = thread
+                    ? ` [thread_id: ${thread.id}; ${thread.isResolved ? "resolved" : "unresolved"}]`
+                    : "";
+                  lines.push("", `### Thread: ${root.path}:${root.line || root.original_line || "unknown"}${threadState}`);
                   for (const comment of (children.get(root.id) || []).sort(
                     (a, b) => new Date(a.created_at) - new Date(b.created_at)
                   )) {
@@ -651,7 +684,7 @@ jobs:
           claude_args: |
             --allowedTools "Read,Bash(gh pr diff:*),Bash(gh pr view:*)"
             ${{ inputs.claude-model != '' && format('--model {0}', inputs.claude-model) || '' }}
-            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","items":{"type":"string"},"description":"Non-blocking suggestions or nits NOT tied to a specific line. Empty array if none."},"inline_comments":{"type":"array","description":"Findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text"}},"required":["path","line","body"]}}},"required":["verdict","summary","blockers","non_blockers","inline_comments"]}'
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","items":{"type":"string"},"description":"Non-blocking suggestions or nits NOT tied to a specific line. Empty array if none."},"resolved_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid inline findings that the current changes address. Empty array if none."},"inline_comments":{"type":"array","description":"Findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text"}},"required":["path","line","body"]}}},"required":["verdict","summary","blockers","non_blockers","resolved_thread_ids","inline_comments"]}'
 
       - name: Post the combined review and report verdict as a check run
         # Run on review success AND failure (to report the verdict), but NOT when the run
@@ -663,6 +696,7 @@ jobs:
           APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
           PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
           HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          SEIDROID_USER_ID: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
         with:
           github-token: ${{ steps.app-token.outputs.token || github.token }}
           script: |
@@ -685,6 +719,11 @@ jobs:
             const summary = String(parsed?.summary ?? "").trim();
             const blockers = Array.isArray(parsed?.blockers) ? parsed.blockers.map(s => String(s).trim()).filter(Boolean) : [];
             const nonBlockers = Array.isArray(parsed?.non_blockers) ? parsed.non_blockers.map(s => String(s).trim()).filter(Boolean) : [];
+            const resolvedThreadIds = [...new Set(
+              Array.isArray(parsed?.resolved_thread_ids)
+                ? parsed.resolved_thread_ids.map(s => String(s).trim()).filter(Boolean)
+                : []
+            )];
             const inline = Array.isArray(parsed?.inline_comments) ? parsed.inline_comments : [];
             const tag = (s) => {
               const v = String(s || "suggestion").toLowerCase();
@@ -772,6 +811,7 @@ jobs:
             else if (haveOutput && verdict === "success" && approveOnSuccess) reviewEvent = "APPROVE";
 
             // ---- 6) Post the review, inline -> body-only -> COMMENT fallback --
+            let postedReviewId = null;
             if (number && sha) {
               const mkComments = () => reviewComments.map(c => ({
                 path: c.path, line: c.line, side: c.side, body: tag(c.severity) + c.body,
@@ -782,7 +822,8 @@ jobs:
                 ...(withComments ? { comments: mkComments() } : {}),
               });
               try {
-                await post(reviewEvent, true, body);
+                const response = await post(reviewEvent, true, body);
+                postedReviewId = response.data.id;
               } catch (e1) {
                 core.warning(`createReview (inline, ${reviewEvent}) failed: ${e1.status} ${e1.message}. Retrying body-only.`);
                 let bodyOnly = body;
@@ -791,11 +832,13 @@ jobs:
                   bodyOnly += `\n\n### Inline comments (could not post inline; listed here)\n${dump.join("\n")}`;
                 }
                 try {
-                  await post(reviewEvent, false, bodyOnly);
+                  const response = await post(reviewEvent, false, bodyOnly);
+                  postedReviewId = response.data.id;
                 } catch (e2) {
                   if (reviewEvent !== "COMMENT") {
                     core.warning(`createReview (body-only, ${reviewEvent}) failed: ${e2.status} ${e2.message}. Retrying as COMMENT.`);
-                    await post("COMMENT", false, bodyOnly);
+                    const response = await post("COMMENT", false, bodyOnly);
+                    postedReviewId = response.data.id;
                   } else {
                     throw e2;
                   }
@@ -803,7 +846,85 @@ jobs:
               }
             }
 
-            // ---- 7) No longer failing? Dismiss our prior REQUEST_CHANGES ------
+            // ---- 7) Resolve prior inline findings fixed by the current changes -
+            if (number && postedReviewId && haveOutput && resolvedThreadIds.length) {
+              try {
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  pull_number: number, per_page: 100,
+                });
+                const botId = String(process.env.SEIDROID_USER_ID || "");
+                const isSeidroid = review => botId
+                  ? String(review.user?.id || "") === botId
+                  : review.user?.login === "seidroid[bot]";
+                const priorReviewIds = new Set(reviews
+                  .filter(r =>
+                    r.id !== postedReviewId &&
+                    isSeidroid(r) &&
+                    (r.body || "").includes(MARKER)
+                  )
+                  .map(r => String(r.id)));
+
+                const eligibleThreadIds = new Set();
+                let cursor = null;
+                do {
+                  const result = await github.graphql(
+                    `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $number) {
+                          reviewThreads(first: 100, after: $cursor) {
+                            nodes {
+                              id
+                              isResolved
+                              comments(first: 1) {
+                                nodes { pullRequestReview { fullDatabaseId } }
+                              }
+                            }
+                            pageInfo { hasNextPage endCursor }
+                          }
+                        }
+                      }
+                    }`,
+                    {
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      number,
+                      cursor,
+                    },
+                  );
+                  const connection = result.repository.pullRequest.reviewThreads;
+                  for (const thread of connection.nodes) {
+                    const reviewId = thread.comments.nodes[0]?.pullRequestReview?.fullDatabaseId;
+                    if (!thread.isResolved && priorReviewIds.has(reviewId)) {
+                      eligibleThreadIds.add(thread.id);
+                    }
+                  }
+                  cursor = connection.pageInfo.hasNextPage
+                    ? connection.pageInfo.endCursor
+                    : null;
+                } while (cursor);
+
+                for (const threadId of resolvedThreadIds) {
+                  if (!eligibleThreadIds.has(threadId)) {
+                    core.warning(`Ignoring ineligible resolved_thread_id: ${threadId}`);
+                    continue;
+                  }
+                  await github.graphql(
+                    `mutation($threadId: ID!) {
+                      resolveReviewThread(input: {threadId: $threadId}) {
+                        thread { id isResolved }
+                      }
+                    }`,
+                    { threadId },
+                  );
+                  core.info(`Resolved addressed review thread ${threadId}.`);
+                }
+              } catch (e) {
+                core.warning(`Could not resolve addressed review threads: ${e.message}`);
+              }
+            }
+
+            // ---- 8) No longer failing? Dismiss our prior REQUEST_CHANGES ------
             if (number && haveOutput && verdict !== "failure") {
               try {
                 const reviews = await github.paginate(github.rest.pulls.listReviews, {
@@ -823,7 +944,7 @@ jobs:
               }
             }
 
-            // ---- 8) Report the verdict as a check run (the merge gate) -------
+            // ---- 9) Report the verdict as a check run (the merge gate) -------
             if (!sha) { core.setFailed("No pull_request head SHA; cannot report status."); return; }
             await github.rest.checks.create({
               owner: context.repo.owner,

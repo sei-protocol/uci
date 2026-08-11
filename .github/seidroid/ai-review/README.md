@@ -5,7 +5,7 @@ use. Two workflows live in `.github/workflows/`:
 
 | Workflow | Trigger (in the caller) | What it does |
 |----------|-------------------------|--------------|
-| `ai-review.yml` | `pull_request` and PR comment events | Three-pass review (OpenAI Codex ∥ Cursor → Claude synthesizes), posting **one** PR review + an `AI Review` check run. It reviews automatically once; an active allowed-team member can request another review with an exact `@seidroid review` comment. |
+| `ai-review.yml` | `pull_request` and PR comment events | Three-pass review (OpenAI Codex ∥ Cursor → Claude synthesizes), posting **one** PR review + an `AI Review` check run. It reviews automatically once; an active allowed-team member can request another review with an exact `@seidroid review` comment. Re-reviews resolve previous seidroid inline threads whose findings have been addressed. |
 | `ai-assistant.yml` | `issue_comment`, `pull_request_review_comment`, `pull_request_review` | Conversational responder: mention `@seidroid` on a PR and the bot answers in-thread. |
 
 ## Base prompts (edit these)
