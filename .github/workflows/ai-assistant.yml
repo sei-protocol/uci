@@ -75,24 +75,45 @@ jobs:
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.comment.user.type != 'Bot' &&
-        contains(github.event.comment.body, inputs.trigger-phrase)
+        contains(github.event.comment.body, inputs.trigger-phrase) &&
+        github.event.comment.body != format('{0} review', inputs.trigger-phrase)
       ) || (
         github.event_name == 'pull_request_review_comment' &&
         github.event.comment.user.type != 'Bot' &&
-        contains(github.event.comment.body, inputs.trigger-phrase)
+        contains(github.event.comment.body, inputs.trigger-phrase) &&
+        github.event.comment.body != format('{0} review', inputs.trigger-phrase)
       ) || (
         github.event_name == 'pull_request_review' &&
         github.event.review.user.type != 'Bot' &&
         github.event.review.body &&
-        contains(github.event.review.body, inputs.trigger-phrase)
+        contains(github.event.review.body, inputs.trigger-phrase) &&
+        github.event.review.body != format('{0} review', inputs.trigger-phrase)
       )
     permissions:
       pull-requests: write   # post the reply / in-thread reply
       issues: write          # reply on the PR conversation timeline
       id-token: write        # Anthropic workload identity federation (OIDC)
     steps:
+      # The review workflow owns the exact `@seidroid review` command. Reserving it here
+      # prevents the conversational assistant from posting a competing generic response.
+      - name: Route request
+        id: route
+        uses: actions/github-script@v9
+        env:
+          BODY: ${{ github.event.comment.body || github.event.review.body }}
+          TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
+        with:
+          script: |
+            const normalize = value =>
+              String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+            const isReview =
+              normalize(process.env.BODY) ===
+              `${normalize(process.env.TRIGGER_PHRASE)} review`;
+            core.setOutput("is_review_command", String(isReview));
+
       - name: Generate GitHub App token
         id: app-token
+        if: success() && steps.route.outputs.is_review_command != 'true'
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
@@ -105,6 +126,7 @@ jobs:
       # ---- Team gate: checked BEFORE Claude. Non-members -> do nothing. --------
       - name: Restrict to team members
         id: gate
+        if: success() && steps.route.outputs.is_review_command != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG_TEAM: ${{ inputs.allowed-team }}

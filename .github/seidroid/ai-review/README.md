@@ -5,7 +5,7 @@ use. Two workflows live in `.github/workflows/`:
 
 | Workflow | Trigger (in the caller) | What it does |
 |----------|-------------------------|--------------|
-| `ai-review.yml` | `pull_request` | Three-pass review (OpenAI Codex ∥ Cursor → Claude synthesizes), posting **one** PR review + an `AI Review` check run. Re-reviews consider earlier seidroid findings and their reply threads. |
+| `ai-review.yml` | `pull_request` and PR comment events | Three-pass review (OpenAI Codex ∥ Cursor → Claude synthesizes), posting **one** PR review + an `AI Review` check run. It reviews automatically once; an active allowed-team member can request another review with an exact `@seidroid review` comment. |
 | `ai-assistant.yml` | `issue_comment`, `pull_request_review_comment`, `pull_request_review` | Conversational responder: mention `@seidroid` on a PR and the bot answers in-thread. |
 
 ## Base prompts (edit these)
@@ -35,7 +35,13 @@ Two layers, both append to the base prompt:
 name: AI Review
 on:
   pull_request:
-    types: [opened, ready_for_review, synchronize, reopened]
+    types: [opened, ready_for_review, synchronize, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
 jobs:
   ai-review:
     uses: sei-protocol/uci/.github/workflows/ai-review.yml@v1
@@ -47,6 +53,7 @@ jobs:
     secrets: inherit
     with:
       uci-ref: v1
+      # allowed-team: my-org/my-team   # default: sei-protocol/sei-core
       # extra-instructions: "Flag added allocations in the hot path."
       # prebuild-script: "go mod download"   # warm Codex's offline sandbox
 ```
@@ -59,6 +66,8 @@ jobs:
 | `extra-instructions` | `''` | Appended to the scout + review prompts. |
 | `prebuild-script` | `''` | Shell run in scout jobs before the tool (e.g. warm offline deps). |
 | `guidelines-file` | `REVIEW.md` | Base-branch guidelines file to load. |
+| `trigger-phrase` | `@seidroid` | Exact `<trigger-phrase> review` command used to request another review. |
+| `allowed-team` | `sei-protocol/sei-core` | Active members may request another review. Empty denies everyone. |
 | `runs-on` | `ubuntu-latest` | Runner label. |
 | `claude-model` | `''` | Optional Claude model override. |
 | `approve-on-success` | `true` | If true, APPROVE on a clean verdict; else COMMENT. |
@@ -110,16 +119,19 @@ jobs:
 - **Org variables**: `PLATFORM_CODE_AGENT_ANTHROPIC_FDRL_ID`, `SEI_LABS_ANTHROPIC_ORG_ID`,
   `PLATFORM_CODE_AGENT_ANTHROPIC_SVAC_ID`, `PLATFORM_CODE_AGENT_USER_ID`.
 - **GitHub App**: the seidroid app must be installed with read access to `sei-protocol/uci`
-  (to fetch the prompts). For the assistant, it also needs organization **Members: Read**
-  on the org owning `allowed-team` — without it the team lookup fails and **everyone is
-  denied** (fail-closed).
+  (to fetch the prompts). The review and assistant workflows also need organization
+  **Members: Read** on the org owning `allowed-team`; without it, re-review requests and
+  all assistant requests are denied (fail-closed).
 
 ## Security notes
 
-- The review workflow must be called from **`pull_request`** (it refuses
-  `pull_request_target`). On `pull_request`, fork PRs receive no secrets and a read-only
-  token, so the workflow degrades gracefully for forks; do not switch to
+- The review workflow must be called from `pull_request` and the PR comment events shown
+  above; it refuses `pull_request_target`. On `pull_request`, fork PRs receive no secrets
+  and a read-only token, so the workflow degrades gracefully for forks; do not switch to
   `pull_request_target` to "fix" forks.
+- An exact `@seidroid review` comment is reserved for the review workflow, so the assistant
+  ignores it. Re-review requests are accepted only from active members of `allowed-team`;
+  membership lookup errors fail closed.
 - The assistant is gated to active members of `allowed-team` (checked before any model
   runs) and ignores bot-authored comments. It is read-only unless `allow-write` is set.
 - Untrusted PR/comment content is passed to the models as **data**, never interpolated

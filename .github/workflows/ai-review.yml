@@ -18,8 +18,8 @@ run-name: UCI / AI Review
 # `pull_request` trigger types. Those events run this workflow only when the changed label
 # is the configured skip label; changes to other labels are ignored.
 #
-# Call it from a `pull_request` event (see .github/seidroid/ai-review/README.md). It refuses to run
-# under `pull_request_target`.
+# Call it from `pull_request` plus the three PR-comment events used by the assistant (see
+# .github/seidroid/ai-review/README.md). It refuses to run under `pull_request_target`.
 on:
   workflow_call:
     inputs:
@@ -58,6 +58,16 @@ on:
         required: false
         type: string
         default: 'ai: skip-review'
+      trigger-phrase:
+        description: "Mention used for an explicit re-review request."
+        required: false
+        type: string
+        default: '@seidroid'
+      allowed-team:
+        description: "org/team-slug allowed to request re-reviews. Empty denies everyone."
+        required: false
+        type: string
+        default: 'sei-protocol/sei-core'
       runs-on:
         description: "Runner label."
         required: false
@@ -82,9 +92,10 @@ on:
 permissions: {}
 
 concurrency:
-  # Only ever review the latest push for a PR; cancel a superseded in-flight run.
-  group: ai-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # Pull-request updates supersede in-flight work. Comment events never cancel an active
+  # review: concurrency is acquired before preflight can reject unrelated comments.
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -93,34 +104,55 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ${{ inputs.runs-on }}
-    # Skipping preflight cascades: the scouts are skipped via `needs`, and claude_review
-    # re-gates on `needs.preflight.result == 'success'`.
+    # Comment events are cheap-filtered here, then exact command parsing and authorization
+    # happen in `resolve`. Non-command comments never reach a model.
     if: >-
       ${{
-        github.event.pull_request.draft == false &&
-        !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) &&
+        github.event_name == 'pull_request' ||
         (
-          (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-          github.event.label.name == inputs.skip-review-label
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          github.event.comment.user.type != 'Bot' &&
+          contains(github.event.comment.body, inputs.trigger-phrase)
+        ) ||
+        (
+          github.event_name == 'pull_request_review_comment' &&
+          github.event.comment.user.type != 'Bot' &&
+          contains(github.event.comment.body, inputs.trigger-phrase)
+        ) ||
+        (
+          github.event_name == 'pull_request_review' &&
+          github.event.review.user.type != 'Bot' &&
+          github.event.review.body &&
+          contains(github.event.review.body, inputs.trigger-phrase)
         )
       }}
     permissions:
       contents: read
       pull-requests: read
     outputs:
+      should_run: ${{ steps.resolve.outputs.should_run }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      pr_title: ${{ steps.resolve.outputs.pr_title }}
+      pr_body: ${{ steps.resolve.outputs.pr_body }}
       scout_prompt: ${{ steps.assemble.outputs.scout_prompt }}
       review_prompt: ${{ steps.assemble.outputs.review_prompt }}
       guidelines: ${{ steps.guidelines.outputs.content }}
       review_history: ${{ steps.review-history.outputs.content }}
     steps:
-      - name: Refuse pull_request_target
+      - name: Refuse unsafe or unsupported events
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "::error::ai-review must be called from a 'pull_request' event, not '$EVENT_NAME'. Refusing to run."
-            exit 1
-          fi
+          case "$EVENT_NAME" in
+            pull_request|issue_comment|pull_request_review_comment|pull_request_review) ;;
+            *)
+              echo "::error::ai-review cannot be called from '$EVENT_NAME'. Refusing to run."
+              exit 1
+              ;;
+          esac
 
       - name: Detect app credentials
         id: creds
@@ -137,9 +169,121 @@ jobs:
           app-id: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
           private-key: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
           owner: ${{ github.repository_owner }}
-          repositories: uci
+          repositories: |
+            ${{ github.event.repository.name }}
+            uci
+
+      # One automatic review per PR. Further reviews require an exact command from an
+      # active member of allowed-team. Membership lookup failures deny access.
+      - name: Resolve and authorize review request
+        id: resolve
+        uses: actions/github-script@v9
+        env:
+          TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
+          ALLOWED_TEAM: ${{ inputs.allowed-team }}
+          SKIP_REVIEW_LABEL: ${{ inputs.skip-review-label }}
+          SEIDROID_USER_ID: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          script: |
+            const MARKER = "<!-- ai-combined-review -->";
+            const eventName = context.eventName;
+            const isAutomatic = eventName === "pull_request";
+            const supportedCommentEvents = new Set([
+              "issue_comment",
+              "pull_request_review_comment",
+              "pull_request_review",
+            ]);
+
+            let number = context.payload.pull_request?.number || context.payload.issue?.number;
+            if (!number || (!isAutomatic && !supportedCommentEvents.has(eventName))) {
+              core.setOutput("should_run", "false");
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: number,
+            });
+            core.setOutput("pr_number", String(number));
+            core.setOutput("head_sha", pr.head.sha);
+            core.setOutput("base_sha", pr.base.sha);
+            core.setOutput("pr_title", pr.title || "");
+            core.setOutput("pr_body", pr.body || "");
+
+            const labels = (pr.labels || []).map(label =>
+              typeof label === "string" ? label : label.name
+            );
+            if (pr.draft || labels.includes(process.env.SKIP_REVIEW_LABEL)) {
+              core.notice("PR is draft or has the skip-review label; review will not run.");
+              core.setOutput("should_run", "false");
+              return;
+            }
+
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner, repo, pull_number: number, per_page: 100,
+            });
+            const botId = String(process.env.SEIDROID_USER_ID || "");
+            const isSeidroid = review => botId
+              ? String(review.user?.id || "") === botId
+              : review.user?.login === "seidroid[bot]";
+            const alreadyReviewed = reviews.some(review =>
+              isSeidroid(review) && (review.body || "").includes(MARKER)
+            );
+
+            if (isAutomatic) {
+              const allowedActions = new Set([
+                "opened", "ready_for_review", "synchronize", "reopened", "labeled", "unlabeled",
+              ]);
+              const relevantLabelEvent =
+                !["labeled", "unlabeled"].includes(context.payload.action) ||
+                context.payload.label?.name === process.env.SKIP_REVIEW_LABEL;
+              const shouldRun =
+                allowedActions.has(context.payload.action) &&
+                relevantLabelEvent &&
+                !alreadyReviewed;
+              if (alreadyReviewed) {
+                core.notice("seidroid has already reviewed this PR; waiting for an authorized @seidroid review request.");
+              }
+              core.setOutput("should_run", String(shouldRun));
+              return;
+            }
+
+            const body = eventName === "pull_request_review"
+              ? context.payload.review?.body
+              : context.payload.comment?.body;
+            const actor = eventName === "pull_request_review"
+              ? context.payload.review?.user?.login
+              : context.payload.comment?.user?.login;
+            const normalize = value => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+            const command = `${normalize(process.env.TRIGGER_PHRASE)} review`;
+            if (normalize(body) !== command || !actor) {
+              core.setOutput("should_run", "false");
+              return;
+            }
+
+            let authorized = false;
+            const team = String(process.env.ALLOWED_TEAM || "");
+            const slash = team.indexOf("/");
+            if (slash > 0 && slash < team.length - 1) {
+              const org = team.slice(0, slash);
+              const team_slug = team.slice(slash + 1);
+              try {
+                const membership = await github.rest.teams.getMembershipForUserInOrg({
+                  org, team_slug, username: actor,
+                });
+                authorized = membership.data.state === "active";
+              } catch (error) {
+                core.notice(`Could not verify active membership for ${actor} in ${team}; denying request.`);
+              }
+            } else {
+              core.notice("allowed-team is empty or invalid; denying request.");
+            }
+            core.setOutput("should_run", String(authorized));
+            if (!authorized) core.notice(`${actor} is not authorized to request a seidroid review.`);
 
       - name: Fetch seidroid prompt files
+        if: steps.resolve.outputs.should_run == 'true'
         uses: actions/checkout@v7
         with:
           repository: sei-protocol/uci
@@ -152,6 +296,7 @@ jobs:
 
       - name: Assemble prompts
         id: assemble
+        if: steps.resolve.outputs.should_run == 'true'
         env:
           EXTRA: ${{ inputs.extra-instructions }}
         run: |
@@ -172,10 +317,11 @@ jobs:
 
       - name: Load review guidelines from the base branch
         id: guidelines
+        if: steps.resolve.outputs.should_run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ steps.resolve.outputs.base_sha }}
           FILE: ${{ inputs.guidelines-file }}
         run: |
           content=""
@@ -193,18 +339,27 @@ jobs:
 
       - name: Load previous seidroid review threads
         id: review-history
+        if: steps.resolve.outputs.should_run == 'true'
         uses: actions/github-script@v9
+        env:
+          SEIDROID_USER_ID: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
         with:
           github-token: ${{ steps.app-token.outputs.token || github.token }}
           script: |
             const MARKER = "<!-- ai-combined-review -->";
             const { owner, repo } = context.repo;
-            const pull_number = context.payload.pull_request.number;
+            const pull_number = Number(${{ steps.resolve.outputs.pr_number }});
 
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
               owner, repo, pull_number, per_page: 100,
             });
-            const seidroidReviews = reviews.filter(r => (r.body || "").includes(MARKER));
+            const botId = String(process.env.SEIDROID_USER_ID || "");
+            const isSeidroid = review => botId
+              ? String(review.user?.id || "") === botId
+              : review.user?.login === "seidroid[bot]";
+            const seidroidReviews = reviews.filter(r =>
+              isSeidroid(r) && (r.body || "").includes(MARKER)
+            );
             const reviewIds = new Set(seidroidReviews.map(r => r.id));
 
             const comments = await github.paginate(github.rest.pulls.listReviewComments, {
@@ -284,7 +439,7 @@ jobs:
     name: Codex
     needs: preflight
     runs-on: ${{ inputs.runs-on }}
-    if: "${{ inputs.enable-codex && github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
+    if: "${{ inputs.enable-codex && needs.preflight.outputs.should_run == 'true' }}"
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -294,7 +449,7 @@ jobs:
       - name: Checkout PR
         uses: actions/checkout@v7
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: refs/pull/${{ needs.preflight.outputs.pr_number }}/merge
           fetch-depth: 0
           persist-credentials: false
 
@@ -302,12 +457,12 @@ jobs:
         env:
           GUIDELINES: ${{ needs.preflight.outputs.guidelines }}
           REVIEW_HISTORY: ${{ needs.preflight.outputs.review_history }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ needs.preflight.outputs.pr_title }}
+          PR_BODY: ${{ needs.preflight.outputs.pr_body }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
           printf '%s\n' "$GUIDELINES" > REVIEW_GUIDELINES.md
           printf '%s\n' "$REVIEW_HISTORY" > PREVIOUS_REVIEW_HISTORY.md
@@ -349,7 +504,7 @@ jobs:
     name: Cursor
     needs: preflight
     runs-on: ${{ inputs.runs-on }}
-    if: "${{ inputs.enable-cursor && github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
+    if: "${{ inputs.enable-cursor && needs.preflight.outputs.should_run == 'true' }}"
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -359,7 +514,7 @@ jobs:
       - name: Checkout PR
         uses: actions/checkout@v7
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: refs/pull/${{ needs.preflight.outputs.pr_number }}/merge
           fetch-depth: 0
           persist-credentials: false
 
@@ -367,12 +522,12 @@ jobs:
         env:
           GUIDELINES: ${{ needs.preflight.outputs.guidelines }}
           REVIEW_HISTORY: ${{ needs.preflight.outputs.review_history }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ needs.preflight.outputs.pr_title }}
+          PR_BODY: ${{ needs.preflight.outputs.pr_body }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
           printf '%s\n' "$GUIDELINES" > REVIEW_GUIDELINES.md
           printf '%s\n' "$REVIEW_HISTORY" > PREVIOUS_REVIEW_HISTORY.md
@@ -434,11 +589,9 @@ jobs:
     name: Claude
     needs: [preflight, codex_review, cursor_review]
     runs-on: ${{ inputs.runs-on }}
-    # `!cancelled()` so this still runs when a scout is skipped (toggled off) or fails;
-    # `needs.preflight.result == 'success'` re-gates on the guard + prompt assembly (and
-    # therefore also on the skip-review label, which skips preflight). The explicit label
-    # check here is belt-and-suspenders.
-    if: "${{ !cancelled() && needs.preflight.result == 'success' && github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, inputs.skip-review-label) }}"
+    # `!cancelled()` lets this run when a scout is toggled off or fails. `should_run`
+    # carries the preflight's draft/label/history/authorization decision to every pass.
+    if: "${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.should_run == 'true' }}"
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -464,6 +617,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: refs/pull/${{ needs.preflight.outputs.pr_number }}/merge
           fetch-depth: 1
           persist-credentials: false
 
@@ -491,7 +645,7 @@ jobs:
           bot_name: 'seidroid[bot]'
           prompt: |
             REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR NUMBER: ${{ needs.preflight.outputs.pr_number }}
 
             ${{ needs.preflight.outputs.review_prompt }}
           claude_args: |
@@ -507,13 +661,14 @@ jobs:
         env:
           STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
           APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
+          PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
         with:
           github-token: ${{ steps.app-token.outputs.token || github.token }}
           script: |
             const approveOnSuccess = String(process.env.APPROVE_ON_SUCCESS || "true") === "true";
-            const pr = context.payload.pull_request;
-            const number = pr?.number;
-            const sha = pr?.head?.sha;
+            const number = Number(process.env.PR_NUMBER);
+            const sha = process.env.HEAD_SHA;
 
             // ---- 1) Parse the structured output -----------------------------
             let parsed = null;
