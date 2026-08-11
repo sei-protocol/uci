@@ -113,7 +113,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app-token
-        if: steps.route.outputs.is_review_command != 'true'
+        if: success() && steps.route.outputs.is_review_command != 'true'
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
@@ -126,7 +126,7 @@ jobs:
       # ---- Team gate: checked BEFORE Claude. Non-members -> do nothing. --------
       - name: Restrict to team members
         id: gate
-        if: steps.route.outputs.is_review_command != 'true'
+        if: success() && steps.route.outputs.is_review_command != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG_TEAM: ${{ inputs.allowed-team }}

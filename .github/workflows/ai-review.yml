@@ -92,9 +92,10 @@ on:
 permissions: {}
 
 concurrency:
-  # Only ever review the latest push for a PR; cancel a superseded in-flight run.
+  # Pull-request updates supersede in-flight work. Comment events never cancel an active
+  # review: concurrency is acquired before preflight can reject unrelated comments.
   group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -616,6 +617,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: refs/pull/${{ needs.preflight.outputs.pr_number }}/merge
           fetch-depth: 1
           persist-credentials: false
 
