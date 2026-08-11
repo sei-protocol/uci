@@ -83,6 +83,11 @@ on:
         required: false
         type: boolean
         default: true
+      re-review-on-push:
+        description: "Run another review on every pull_request synchronize event."
+        required: false
+        type: boolean
+        default: false
       timeout-minutes:
         description: "Per-job timeout in minutes."
         required: false
@@ -173,8 +178,9 @@ jobs:
             ${{ github.event.repository.name }}
             uci
 
-      # One automatic review per PR. Further reviews require an exact command from an
-      # active member of allowed-team. Membership lookup failures deny access.
+      # By default, run one automatic review per PR. Callers may opt into re-reviewing
+      # every synchronize event; otherwise further reviews require an exact command from
+      # an active member of allowed-team. Membership lookup failures deny access.
       - name: Resolve and authorize review request
         id: resolve
         uses: actions/github-script@v9
@@ -183,6 +189,7 @@ jobs:
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
           SKIP_REVIEW_LABEL: ${{ inputs.skip-review-label }}
           SEIDROID_USER_ID: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
+          RE_REVIEW_ON_PUSH: ${{ inputs.re-review-on-push }}
         with:
           github-token: ${{ steps.app-token.outputs.token || github.token }}
           script: |
@@ -238,11 +245,14 @@ jobs:
               const relevantLabelEvent =
                 !["labeled", "unlabeled"].includes(context.payload.action) ||
                 context.payload.label?.name === process.env.SKIP_REVIEW_LABEL;
+              const automaticReReview =
+                context.payload.action === "synchronize" &&
+                String(process.env.RE_REVIEW_ON_PUSH || "false") === "true";
               const shouldRun =
                 allowedActions.has(context.payload.action) &&
                 relevantLabelEvent &&
-                !alreadyReviewed;
-              if (alreadyReviewed) {
+                (!alreadyReviewed || automaticReReview);
+              if (alreadyReviewed && !automaticReReview) {
                 core.notice("seidroid has already reviewed this PR; waiting for an authorized @seidroid review request.");
               }
               core.setOutput("should_run", String(shouldRun));
