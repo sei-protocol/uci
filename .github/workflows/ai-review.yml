@@ -367,34 +367,38 @@ jobs:
             });
             const byId = new Map(comments.map(c => [c.id, c]));
             const threadByRootCommentId = new Map();
-            let threadCursor = null;
-            do {
-              const result = await github.graphql(
-                `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-                  repository(owner: $owner, name: $repo) {
-                    pullRequest(number: $number) {
-                      reviewThreads(first: 100, after: $cursor) {
-                        nodes {
-                          id
-                          isResolved
-                          comments(first: 1) { nodes { fullDatabaseId } }
+            try {
+              let threadCursor = null;
+              do {
+                const result = await github.graphql(
+                  `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 100, after: $cursor) {
+                          nodes {
+                            id
+                            isResolved
+                            comments(first: 1) { nodes { fullDatabaseId } }
+                          }
+                          pageInfo { hasNextPage endCursor }
                         }
-                        pageInfo { hasNextPage endCursor }
                       }
                     }
-                  }
-                }`,
-                { owner, repo, number: pull_number, cursor: threadCursor },
-              );
-              const connection = result.repository.pullRequest.reviewThreads;
-              for (const thread of connection.nodes) {
-                const rootId = thread.comments.nodes[0]?.fullDatabaseId;
-                if (rootId) threadByRootCommentId.set(rootId, thread);
-              }
-              threadCursor = connection.pageInfo.hasNextPage
-                ? connection.pageInfo.endCursor
-                : null;
-            } while (threadCursor);
+                  }`,
+                  { owner, repo, number: pull_number, cursor: threadCursor },
+                );
+                const connection = result.repository.pullRequest.reviewThreads;
+                for (const thread of connection.nodes) {
+                  const rootId = thread.comments.nodes[0]?.fullDatabaseId;
+                  if (rootId) threadByRootCommentId.set(rootId, thread);
+                }
+                threadCursor = connection.pageInfo.hasNextPage
+                  ? connection.pageInfo.endCursor
+                  : null;
+              } while (threadCursor);
+            } catch (e) {
+              core.warning(`Could not load review thread metadata: ${e.message}. Continuing without thread IDs.`);
+            }
             const rootFor = (comment) => {
               let current = comment;
               const seen = new Set();
