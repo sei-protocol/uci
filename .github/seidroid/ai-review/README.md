@@ -5,7 +5,7 @@ use. Two workflows live in `.github/workflows/`:
 
 | Workflow | Trigger (in the caller) | What it does |
 |----------|-------------------------|--------------|
-| `ai-review.yml` | `pull_request` and PR comment events | Three-pass review (OpenAI Codex ∥ Cursor → Claude synthesizes), posting **one** PR review + an `AI Review` check run. It reviews automatically once; an active allowed-team member can request another review with an exact `@seidroid review` comment. |
+| `ai-review.yml` | `pull_request` and PR comment events | Three-pass review (OpenAI Codex ∥ Cursor → Claude synthesizes), posting **one** PR review + an `AI Review` check run. By default it reviews automatically once; callers can enable re-review on every push, and an active allowed-team member can request another review with an exact `@seidroid review` comment. Re-reviews resolve previous seidroid inline threads whose findings were addressed or superseded by a new inline comment. |
 | `ai-assistant.yml` | `issue_comment`, `pull_request_review_comment`, `pull_request_review` | Conversational responder: mention `@seidroid` on a PR and the bot answers in-thread. |
 
 ## Base prompts (edit these)
@@ -56,6 +56,7 @@ jobs:
       # allowed-team: my-org/my-team   # default: sei-protocol/sei-core
       # extra-instructions: "Flag added allocations in the hot path."
       # prebuild-script: "go mod download"   # warm Codex's offline sandbox
+      # re-review-on-push: true         # review again after every PR push
 ```
 
 | Input | Default | Notes |
@@ -71,6 +72,7 @@ jobs:
 | `runs-on` | `ubuntu-latest` | Runner label. |
 | `claude-model` | `''` | Optional Claude model override. |
 | `approve-on-success` | `true` | If true, APPROVE on a clean verdict; else COMMENT. |
+| `re-review-on-push` | `false` | Re-run the review on every `pull_request.synchronize` event, even after seidroid has already reviewed the PR. |
 | `timeout-minutes` | `15` | Per-job timeout. |
 
 ## Using the assistant workflow
