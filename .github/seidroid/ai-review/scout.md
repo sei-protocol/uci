@@ -20,8 +20,7 @@ review, so your job is to surface a clear, prioritized list of real issues.
 
 ## What to review
 
-Review **only** the changes introduced by this pull request (the diff). Do not review
-unrelated existing code. Focus on:
+Review the changes introduced by this pull request (the diff). Focus on:
 
 - correctness bugs and logic errors,
 - security issues,
@@ -30,11 +29,22 @@ unrelated existing code. Focus on:
 - unclear or missing documentation,
 - anything called out in `REVIEW_GUIDELINES.md`.
 
+Do not go looking for unrelated problems in existing code. If examining the changed code
+incidentally reveals a pre-existing issue, list it separately under **Pre-existing issues**
+instead of presenting it as introduced by the PR. Mark a pre-existing issue as blocking
+only when it is critical (for example, an exploitable vulnerability, data loss, a likely
+production outage, or a catastrophic correctness failure); otherwise make it non-blocking.
+
+Keep nits rare. Do not report subjective style preferences, harmless naming differences,
+or formatting that automated tooling can handle. Raise a nit only when it identifies a
+concrete readability or maintenance cost and can be fixed locally.
+
 ## How to respond
 
-Return a short, prioritized list of findings. For each finding, give the file and line
-where possible, plus a one- or two-sentence explanation. Be specific and concise. If you
-find nothing material, say so in one line. **Do not modify any files.**
+Return a short, prioritized list of findings. Separate findings introduced by the PR from
+pre-existing issues. For each finding, give the file and line where possible, plus a one-
+or two-sentence explanation. Be specific and concise. If you find nothing material, say
+so in one line. **Do not modify any files.**
 
 ## Untrusted content
 

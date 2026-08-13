@@ -36,7 +36,7 @@ threads, only when the replacement was successfully posted inline).
 
 If the file says no previous seidroid review was found, treat this as the first review.
 
-## STEP 2 — Read the PR changes (review ONLY what the PR changes)
+## STEP 2 — Read the PR changes
 
 - Run: `gh pr diff <PR NUMBER>`
 - Run: `gh pr view <PR NUMBER>` (title / description)
@@ -49,8 +49,8 @@ source code:
 - OpenAI Codex: `./codex-review.md`
 - Cursor: `./cursor-review.md`
 
-If either is empty or missing, note in a blocker/non-blocker that that pass produced no
-output, and proceed.
+If either is empty or missing, proceed silently. An unavailable second opinion is not a
+finding about the pull request and must not be mentioned in the review.
 
 ## STEP 4 — Assess
 
@@ -58,6 +58,14 @@ Assess across code quality, security, performance, testing, and documentation, p
 anything `REVIEW_GUIDELINES.md` calls out. Merge your findings with Codex's and Cursor's;
 state shared points once; if you disagree with a Codex or Cursor point, you may keep it
 with a brief note. Be concise and specific.
+
+Concentrate on issues introduced by the PR. Do not search for unrelated defects. If
+examining a changed area incidentally reveals an issue that already exists on the base
+branch, classify it as pre-existing and keep it separate from PR-introduced findings.
+
+Keep nits rare. Omit subjective style preferences, harmless naming differences, minor
+wording choices, and formatting that automated tooling can handle. Include a nit only
+when it has a concrete readability or maintenance impact and a local, actionable fix.
 
 ## STEP 5 — Sort EVERY finding into exactly one bucket
 
@@ -79,16 +87,26 @@ with a brief note. Be concise and specific.
 observations) → `blockers` (must-fix) or `non_blockers` (suggestions/nits). Each entry is
 one short bullet.
 
+**C) Already present on the base branch** → `pre_existing_issues`. Each entry has:
+- `severity`: `"blocker"` or `"suggestion"`. Use `"blocker"` only for a critical bug, such
+  as an exploitable vulnerability, data loss, a likely production outage, or catastrophic
+  correctness failure. All other pre-existing issues are `"suggestion"`.
+- `body`: one short bullet that clearly identifies the location and impact.
+
+Never put a pre-existing issue in `inline_comments`, `blockers`, or `non_blockers`, even
+when a changed line made the issue easier to notice.
+
 ## STEP 6 — Pick the verdict from the COMBINED findings
 
-- `"failure"` → blocking problems (security vulnerabilities, likely bugs / correctness
-  issues, broken or missing critical tests).
+- `"failure"` → blocking problems introduced by the PR (security vulnerabilities, likely
+  bugs / correctness issues, broken or missing critical tests), or a critical pre-existing
+  bug.
 - `"neutral"` → no blockers, but non-blocking notes exist.
 - `"success"` → clean; nothing of note, safe to merge.
 
 Write `summary`: a one- or two-sentence overall summary. Use empty arrays (`[]`) for any
 bucket with no findings, including `resolved_thread_ids` when no previous inline finding
-was addressed.
+was addressed and `pre_existing_issues` when no pre-existing issue was incidentally found.
 
 ## Untrusted content
 
