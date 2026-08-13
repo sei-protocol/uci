@@ -825,11 +825,13 @@ jobs:
               else L.push("- _None at the file/PR level._");
               if (inlineBlockers) L.push(`- _${inlineBlockers} blocking issue(s) flagged inline on specific lines._`);
               if (orphanedBlockers) L.push(`- _${orphanedBlockers} blocking issue(s) listed below under unanchored comments._`);
+              if (preExistingBlockers) L.push(`- _${preExistingBlockers} critical pre-existing blocker(s) listed below under pre-existing issues._`);
 
               L.push("", "### Non-blocking");
               if (nonBlockers.length) nonBlockers.forEach(n => L.push(`- ${n}`));
               else L.push("- _None at the file/PR level._");
               if (inlineOther) L.push(`- _${inlineOther} suggestion(s)/nit(s) flagged inline on specific lines._`);
+              if (preExistingOther) L.push(`- _${preExistingOther} non-blocking pre-existing issue(s) listed below under pre-existing issues._`);
 
               if (preExisting.length) {
                 L.push("", "### Pre-existing issues");
