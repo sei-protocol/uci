@@ -612,7 +612,7 @@ jobs:
         run: |
           set +e
           if [ -z "$CURSOR_API_KEY" ]; then
-            echo "::warning::CURSOR_API_KEY is empty -- skipping Cursor; Claude will note no Cursor output."
+            echo "::notice::CURSOR_API_KEY is empty -- skipping Cursor."
             { echo "message<<__EMPTY__"; echo ""; echo "__EMPTY__"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -698,7 +698,7 @@ jobs:
           claude_args: |
             --allowedTools "Read,Bash(gh pr diff:*),Bash(gh pr view:*)"
             ${{ inputs.claude-model != '' && format('--model {0}', inputs.claude-model) || '' }}
-            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","items":{"type":"string"},"description":"Non-blocking suggestions or nits NOT tied to a specific line. Empty array if none."},"resolved_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid inline findings that the current changes address. Empty array if none."},"inline_comments":{"type":"array","description":"Findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text without a severity prefix."},"supersedes_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid findings replaced by this new inline comment. Empty array for a new finding."}},"required":["path","line","severity","body","supersedes_thread_ids"]}}},"required":["verdict","summary","blockers","non_blockers","resolved_thread_ids","inline_comments"]}'
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues introduced by the PR and NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","items":{"type":"string"},"description":"Non-blocking suggestions or nits introduced by the PR and NOT tied to a specific line. Empty array if none."},"pre_existing_issues":{"type":"array","description":"Issues already present on the base branch. Empty array if none.","items":{"type":"object","properties":{"severity":{"type":"string","enum":["blocker","suggestion"],"description":"Use blocker only for a critical pre-existing bug."},"body":{"type":"string","description":"Concise issue including its location and impact."}},"required":["severity","body"]}},"resolved_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid inline findings that the current changes address. Empty array if none."},"inline_comments":{"type":"array","description":"PR-introduced findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text without a severity prefix."},"supersedes_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid findings replaced by this new inline comment. Empty array for a new finding."}},"required":["path","line","severity","body","supersedes_thread_ids"]}}},"required":["verdict","summary","blockers","non_blockers","pre_existing_issues","resolved_thread_ids","inline_comments"]}'
 
       - name: Post the combined review and report verdict as a check run
         # Run on review success AND failure (to report the verdict), but NOT when the run
@@ -733,6 +733,14 @@ jobs:
             const summary = String(parsed?.summary ?? "").trim();
             const blockers = Array.isArray(parsed?.blockers) ? parsed.blockers.map(s => String(s).trim()).filter(Boolean) : [];
             const nonBlockers = Array.isArray(parsed?.non_blockers) ? parsed.non_blockers.map(s => String(s).trim()).filter(Boolean) : [];
+            const preExisting = Array.isArray(parsed?.pre_existing_issues)
+              ? parsed.pre_existing_issues.map(issue => ({
+                  severity: String(issue?.severity ?? "suggestion").toLowerCase() === "blocker"
+                    ? "blocker"
+                    : "suggestion",
+                  body: String(issue?.body ?? "").trim(),
+                })).filter(issue => issue.body)
+              : [];
             const resolvedThreadIds = [...new Set(
               Array.isArray(parsed?.resolved_thread_ids)
                 ? parsed.resolved_thread_ids.map(s => String(s).trim()).filter(Boolean)
@@ -794,11 +802,13 @@ jobs:
             const inlineBlockers = reviewComments.filter(c => c.severity === "blocker").length;
             const inlineOther = reviewComments.length - inlineBlockers;
             const orphanedBlockers = orphaned.filter(c => c.severity === "blocker").length;
+            const preExistingBlockers = preExisting.filter(issue => issue.severity === "blocker").length;
+            const preExistingOther = preExisting.length - preExistingBlockers;
 
             // Blocker-driven gate: pass iff there are zero blocker findings anywhere
-            // (PR/file-level, anchored inline, or orphaned inline). Supersedes Claude's
-            // reported `verdict` whenever we actually have parsed output.
-            const totalBlockers = blockers.length + inlineBlockers + orphanedBlockers;
+            // (PR/file-level, anchored inline, orphaned inline, or critical pre-existing).
+            // Supersedes Claude's reported `verdict` whenever we have parsed output.
+            const totalBlockers = blockers.length + inlineBlockers + orphanedBlockers + preExistingBlockers;
             if (haveOutput) verdict = totalBlockers > 0 ? "failure" : "success";
 
             // ---- 4) Assemble the review body ---------------------------------
@@ -808,18 +818,25 @@ jobs:
             } else {
               const L = [];
               if (summary) L.push(summary);
-              L.push("", `**Findings:** ${totalBlockers} blocking | ${nonBlockers.length + inlineOther} non-blocking | ${reviewComments.length} posted inline`);
+              L.push("", `**Findings:** ${totalBlockers} blocking | ${nonBlockers.length + inlineOther + preExistingOther} non-blocking | ${reviewComments.length} posted inline`);
 
               L.push("", "### Blockers");
               if (blockers.length) blockers.forEach(b => L.push(`- ${b}`));
               else L.push("- _None at the file/PR level._");
               if (inlineBlockers) L.push(`- _${inlineBlockers} blocking issue(s) flagged inline on specific lines._`);
               if (orphanedBlockers) L.push(`- _${orphanedBlockers} blocking issue(s) listed below under unanchored comments._`);
+              if (preExistingBlockers) L.push(`- _${preExistingBlockers} critical pre-existing blocker(s) listed below under pre-existing issues._`);
 
               L.push("", "### Non-blocking");
               if (nonBlockers.length) nonBlockers.forEach(n => L.push(`- ${n}`));
               else L.push("- _None at the file/PR level._");
               if (inlineOther) L.push(`- _${inlineOther} suggestion(s)/nit(s) flagged inline on specific lines._`);
+              if (preExistingOther) L.push(`- _${preExistingOther} non-blocking pre-existing issue(s) listed below under pre-existing issues._`);
+
+              if (preExisting.length) {
+                L.push("", "### Pre-existing issues");
+                preExisting.forEach(issue => L.push(`- ${tag(issue.severity)}${issue.body}`));
+              }
 
               if (orphaned.length) {
                 L.push("", "### Comments that couldn't be anchored to the diff");
