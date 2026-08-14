@@ -131,6 +131,8 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG_TEAM: ${{ inputs.allowed-team }}
           ACTOR: ${{ github.event.comment.user.login || github.event.review.user.login }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
           if [ -z "$ORG_TEAM" ]; then
             echo "::notice::allowed-team is empty; denying by default (fail closed)."
@@ -142,13 +144,28 @@ jobs:
           # Fail closed: 404 (not a member), 403 (app missing Members:read), an empty actor,
           # or a "pending" invite all resolve to "not active" -> deny.
           STATE="$(gh api "orgs/${ORG}/teams/${TEAM}/memberships/${ACTOR}" --jq '.state' 2>/dev/null || true)"
-          if [ "$STATE" = "active" ]; then
-            echo "is_member=true" >> "$GITHUB_OUTPUT"
-            echo "Authorized: ${ACTOR} is an active member of ${ORG_TEAM}."
-          else
+          if [ "$STATE" != "active" ]; then
             echo "is_member=false" >> "$GITHUB_OUTPUT"
             echo "::notice::${ACTOR} is not an active member of ${ORG_TEAM}; seidroid will not respond."
+            exit 0
           fi
+
+          IS_FORK="$(
+            gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+              --jq '.head.repo.id != .base.repo.id' 2>/dev/null || true
+          )"
+          if [ "$IS_FORK" != "false" ]; then
+            echo "is_member=false" >> "$GITHUB_OUTPUT"
+            if [ "$IS_FORK" = "true" ]; then
+              echo "::notice::Seidroid Assistant is disabled for fork-originated pull requests."
+            else
+              echo "::notice::Could not verify the pull request source repository; denying request."
+            fi
+            exit 0
+          fi
+
+          echo "is_member=true" >> "$GITHUB_OUTPUT"
+          echo "Authorized: ${ACTOR} is an active member of ${ORG_TEAM}."
       - name: React 👀 while working
         id: ack
         if: steps.gate.outputs.is_member == 'true' && github.event_name != 'pull_request_review'

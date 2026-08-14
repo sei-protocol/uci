@@ -212,6 +212,16 @@ jobs:
             const { data: pr } = await github.rest.pulls.get({
               owner, repo, pull_number: number,
             });
+
+            const isFork = pr.head.repo?.id !== pr.base.repo?.id;
+            if (!isAutomatic && isFork) {
+              core.notice(
+                "Explicit re-reviews are disabled for fork-originated pull requests."
+              );
+              core.setOutput("should_run", "false");
+              return;
+            }
+
             core.setOutput("pr_number", String(number));
             core.setOutput("head_sha", pr.head.sha);
             core.setOutput("base_sha", pr.base.sha);
