@@ -10,6 +10,8 @@ run-name: UCI / AI Review
 #                      never see the app token or any write scope.
 #   * claude_review -> consumes BOTH, does its own review, MERGES all three, returns TYPED
 #                      output, then a github-script step posts one PR review + a check run.
+#   * complete_review_reaction -> clears the in-progress reaction and, when the review
+#                      succeeds, marks an explicit request complete.
 #
 # Skip switch: label a PR with the `skip-review-label` input value (default `ai: skip-review`)
 # and the whole pipeline is skipped -- no scouts, no Claude review, no PR review, no
@@ -315,15 +317,19 @@ jobs:
               return;
             }
 
-            await github.graphql(
-              `mutation($subjectId: ID!) {
-                addReaction(input: {subjectId: $subjectId, content: EYES}) {
-                  reaction { content }
-                }
-              }`,
-              { subjectId },
-            );
-            core.setOutput("reaction_subject_id", subjectId);
+            try {
+              await github.graphql(
+                `mutation($subjectId: ID!) {
+                  addReaction(input: {subjectId: $subjectId, content: EYES}) {
+                    reaction { content }
+                  }
+                }`,
+                { subjectId },
+              );
+              core.setOutput("reaction_subject_id", subjectId);
+            } catch (error) {
+              core.warning(`Could not add the in-progress reaction: ${error.message}`);
+            }
 
       - name: Fetch seidroid prompt files
         if: steps.resolve.outputs.should_run == 'true'
@@ -1062,6 +1068,7 @@ jobs:
       - name: Generate GitHub App token
         id: app-token
         if: steps.creds.outputs.present == 'true'
+        continue-on-error: true
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
@@ -1073,23 +1080,34 @@ jobs:
         uses: actions/github-script@v9
         env:
           SUBJECT_ID: ${{ needs.preflight.outputs.reaction_subject_id }}
+          REVIEW_SUCCEEDED: ${{ needs.claude_review.result == 'success' }}
         with:
           github-token: ${{ steps.app-token.outputs.token || github.token }}
           script: |
             const subjectId = process.env.SUBJECT_ID;
-            await github.graphql(
-              `mutation($subjectId: ID!) {
-                removeReaction(input: {subjectId: $subjectId, content: EYES}) {
-                  subject { id }
-                }
-              }`,
-              { subjectId },
-            );
-            await github.graphql(
-              `mutation($subjectId: ID!) {
-                addReaction(input: {subjectId: $subjectId, content: THUMBS_UP}) {
-                  reaction { content }
-                }
-              }`,
-              { subjectId },
-            );
+            if (process.env.REVIEW_SUCCEEDED === "true") {
+              try {
+                await github.graphql(
+                  `mutation($subjectId: ID!) {
+                    addReaction(input: {subjectId: $subjectId, content: THUMBS_UP}) {
+                      reaction { content }
+                    }
+                  }`,
+                  { subjectId },
+                );
+              } catch (error) {
+                core.warning(`Could not add the completion reaction: ${error.message}`);
+              }
+            }
+            try {
+              await github.graphql(
+                `mutation($subjectId: ID!) {
+                  removeReaction(input: {subjectId: $subjectId, content: EYES}) {
+                    subject { id }
+                  }
+                }`,
+                { subjectId },
+              );
+            } catch (error) {
+              core.warning(`Could not clear the in-progress reaction: ${error.message}`);
+            }
