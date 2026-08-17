@@ -134,9 +134,10 @@ jobs:
       }}
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
     outputs:
       should_run: ${{ steps.resolve.outputs.should_run }}
+      reaction_subject_id: ${{ steps.resolve.outputs.reaction_subject_id }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       base_sha: ${{ steps.resolve.outputs.base_sha }}
@@ -299,8 +300,30 @@ jobs:
             } else {
               core.notice("allowed-team is empty or invalid; denying request.");
             }
+
             core.setOutput("should_run", String(authorized));
-            if (!authorized) core.notice(`${actor} is not authorized to request a seidroid review.`);
+            if (!authorized) {
+              core.notice(`${actor} is not authorized to request a seidroid review.`);
+              return;
+            }
+
+            const subjectId = eventName === "pull_request_review"
+              ? context.payload.review?.node_id
+              : context.payload.comment?.node_id;
+            if (!subjectId) {
+              core.warning("The review request has no reactable GitHub node ID.");
+              return;
+            }
+
+            await github.graphql(
+              `mutation($subjectId: ID!) {
+                addReaction(input: {subjectId: $subjectId, content: EYES}) {
+                  reaction { content }
+                }
+              }`,
+              { subjectId },
+            );
+            core.setOutput("reaction_subject_id", subjectId);
 
       - name: Fetch seidroid prompt files
         if: steps.resolve.outputs.should_run == 'true'
@@ -1020,3 +1043,53 @@ jobs:
                 summary: summary || "No summary provided.",
               },
             });
+
+  complete_review_reaction:
+    name: Complete review reaction
+    needs: [preflight, codex_review, cursor_review, claude_review]
+    if: ${{ always() && needs.preflight.outputs.reaction_subject_id != '' }}
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Detect app credentials
+        id: creds
+        env:
+          APP_ID: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
+        run: |
+          if [ -n "$APP_ID" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Generate GitHub App token
+        id: app-token
+        if: steps.creds.outputs.present == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Mark review request complete
+        uses: actions/github-script@v9
+        env:
+          SUBJECT_ID: ${{ needs.preflight.outputs.reaction_subject_id }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          script: |
+            const subjectId = process.env.SUBJECT_ID;
+            await github.graphql(
+              `mutation($subjectId: ID!) {
+                removeReaction(input: {subjectId: $subjectId, content: EYES}) {
+                  subject { id }
+                }
+              }`,
+              { subjectId },
+            );
+            await github.graphql(
+              `mutation($subjectId: ID!) {
+                addReaction(input: {subjectId: $subjectId, content: THUMBS_UP}) {
+                  reaction { content }
+                }
+              }`,
+              { subjectId },
+            );
