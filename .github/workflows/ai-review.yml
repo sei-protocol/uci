@@ -777,6 +777,10 @@ jobs:
             try { parsed = JSON.parse(process.env.STRUCTURED_OUTPUT || ""); }
             catch (e) { core.warning(`Could not parse structured_output: ${e.message}`); }
             const haveOutput = parsed && typeof parsed === "object";
+            const stripSeverityTags = (body) => String(body || "").replace(
+              /^(?:\s*(?:\*\*)?\[(?:blocker|suggestion|nit)\](?:\*\*)?\s*)+/i,
+              "",
+            ).trim();
 
             let verdict = String(parsed?.verdict ?? "").trim().toLowerCase();
             const VALID = ["success", "neutral", "failure"];
@@ -787,12 +791,14 @@ jobs:
             const summary = String(parsed?.summary ?? "").trim();
             const blockers = Array.isArray(parsed?.blockers) ? parsed.blockers.map(s => String(s).trim()).filter(Boolean) : [];
             const nonBlockers = Array.isArray(parsed?.non_blockers)
-              ? parsed.non_blockers.map(finding => ({
-                  severity: String(finding?.severity ?? "suggestion").toLowerCase() === "nit"
-                    ? "nit"
-                    : "suggestion",
-                  body: String(finding?.body ?? "").trim(),
-                })).filter(finding =>
+              ? parsed.non_blockers.map(finding => typeof finding === "string"
+                ? { severity: "suggestion", body: stripSeverityTags(finding) }
+                : {
+                    severity: String(finding?.severity ?? "suggestion").toLowerCase() === "nit"
+                      ? "nit"
+                      : "suggestion",
+                    body: stripSeverityTags(finding?.body),
+                  }).filter(finding =>
                   finding.body && (includeNits || finding.severity !== "nit")
                 )
               : [];
@@ -814,10 +820,6 @@ jobs:
               const v = String(s || "suggestion").toLowerCase();
               return v === "blocker" ? "**[blocker]** " : v === "nit" ? "**[nit]** " : "**[suggestion]** ";
             };
-            const stripSeverityTags = (body) => String(body || "").replace(
-              /^(?:\s*(?:\*\*)?\[(?:blocker|suggestion|nit)\](?:\*\*)?\s*)+/i,
-              "",
-            ).trim();
 
             // ---- 2) Build a commentable-line index from the actual PR diff ----
             const valid = { RIGHT: {}, LEFT: {} };
