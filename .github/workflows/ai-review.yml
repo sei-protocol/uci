@@ -18,7 +18,10 @@ run-name: UCI / AI Review
 # "AI Review" check run. For adding/removing the label to take effect immediately (not just
 # on the next push), the caller should include `labeled` and `unlabeled` in its
 # `pull_request` trigger types. Those events run this workflow only when the changed label
-# is the configured skip label; changes to other labels are ignored.
+# is the configured skip or nitpick label; changes to other labels are ignored.
+#
+# Nit switch: nit-level findings are included only when the PR has the `nitpick-label`
+# input value (default `ai: nitpick`). Suggestions and blockers are unaffected.
 #
 # Call it from `pull_request` plus the three PR-comment events used by the assistant (see
 # .github/seidroid/ai-review/README.md). It refuses to run under `pull_request_target`.
@@ -60,6 +63,11 @@ on:
         required: false
         type: string
         default: 'ai: skip-review'
+      nitpick-label:
+        description: "Include nit-level findings only when this label is present on the PR."
+        required: false
+        type: string
+        default: 'ai: nitpick'
       trigger-phrase:
         description: "Mention used for an explicit re-review request."
         required: false
@@ -145,6 +153,7 @@ jobs:
       base_sha: ${{ steps.resolve.outputs.base_sha }}
       pr_title: ${{ steps.resolve.outputs.pr_title }}
       pr_body: ${{ steps.resolve.outputs.pr_body }}
+      include_nits: ${{ steps.resolve.outputs.include_nits }}
       scout_prompt: ${{ steps.assemble.outputs.scout_prompt }}
       review_prompt: ${{ steps.assemble.outputs.review_prompt }}
       guidelines: ${{ steps.guidelines.outputs.content }}
@@ -191,6 +200,7 @@ jobs:
           TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
           SKIP_REVIEW_LABEL: ${{ inputs.skip-review-label }}
+          NITPICK_LABEL: ${{ inputs.nitpick-label }}
           SEIDROID_USER_ID: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
           RE_REVIEW_ON_PUSH: ${{ inputs.re-review-on-push }}
         with:
@@ -234,6 +244,7 @@ jobs:
             const labels = (pr.labels || []).map(label =>
               typeof label === "string" ? label : label.name
             );
+            core.setOutput("include_nits", String(labels.includes(process.env.NITPICK_LABEL)));
             if (pr.draft || labels.includes(process.env.SKIP_REVIEW_LABEL)) {
               core.notice("PR is draft or has the skip-review label; review will not run.");
               core.setOutput("should_run", "false");
@@ -257,7 +268,8 @@ jobs:
               ]);
               const relevantLabelEvent =
                 !["labeled", "unlabeled"].includes(context.payload.action) ||
-                context.payload.label?.name === process.env.SKIP_REVIEW_LABEL;
+                [process.env.SKIP_REVIEW_LABEL, process.env.NITPICK_LABEL]
+                  .includes(context.payload.label?.name);
               const automaticReReview =
                 context.payload.action === "synchronize" &&
                 String(process.env.RE_REVIEW_ON_PUSH || "false") === "true";
@@ -732,12 +744,13 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ needs.preflight.outputs.pr_number }}
+            INCLUDE NITS: ${{ needs.preflight.outputs.include_nits }}
 
             ${{ needs.preflight.outputs.review_prompt }}
           claude_args: |
             --allowedTools "Read,Bash(gh pr diff:*),Bash(gh pr view:*)"
             ${{ inputs.claude-model != '' && format('--model {0}', inputs.claude-model) || '' }}
-            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues introduced by the PR and NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","items":{"type":"string"},"description":"Non-blocking suggestions or nits introduced by the PR and NOT tied to a specific line. Empty array if none."},"pre_existing_issues":{"type":"array","description":"Issues already present on the base branch. Empty array if none.","items":{"type":"object","properties":{"severity":{"type":"string","enum":["blocker","suggestion"],"description":"Use blocker only for a critical pre-existing bug."},"body":{"type":"string","description":"Concise issue including its location and impact."}},"required":["severity","body"]}},"resolved_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid inline findings that the current changes address. Empty array if none."},"inline_comments":{"type":"array","description":"PR-introduced findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text without a severity prefix."},"supersedes_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid findings replaced by this new inline comment. Empty array for a new finding."}},"required":["path","line","severity","body","supersedes_thread_ids"]}}},"required":["verdict","summary","blockers","non_blockers","pre_existing_issues","resolved_thread_ids","inline_comments"]}'
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["success","neutral","failure"],"description":"Overall combined verdict"},"summary":{"type":"string","description":"One- or two-sentence overall summary"},"blockers":{"type":"array","items":{"type":"string"},"description":"Blocking issues introduced by the PR and NOT tied to a specific line. Empty array if none."},"non_blockers":{"type":"array","description":"Non-blocking findings introduced by the PR and NOT tied to a specific line. Empty array if none.","items":{"type":"object","properties":{"severity":{"type":"string","enum":["suggestion","nit"],"description":"Severity of this non-blocking finding"},"body":{"type":"string","description":"Concise finding without a severity prefix."}},"required":["severity","body"]}},"pre_existing_issues":{"type":"array","description":"Issues already present on the base branch. Empty array if none.","items":{"type":"object","properties":{"severity":{"type":"string","enum":["blocker","suggestion"],"description":"Use blocker only for a critical pre-existing bug."},"body":{"type":"string","description":"Concise issue including its location and impact."}},"required":["severity","body"]}},"resolved_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid inline findings that the current changes address. Empty array if none."},"inline_comments":{"type":"array","description":"PR-introduced findings tied to a specific changed line. Empty array if none.","items":{"type":"object","properties":{"path":{"type":"string","description":"Repo-relative file path exactly as in the diff"},"line":{"type":"integer","description":"Line number on the given side. NEW file line for RIGHT, OLD file line for LEFT. Must be a line present in the PR diff."},"side":{"type":"string","enum":["RIGHT","LEFT"],"description":"RIGHT = new/head version (default). LEFT = base/old version, for comments on removed lines."},"severity":{"type":"string","enum":["blocker","suggestion","nit"],"description":"Severity of this inline finding"},"body":{"type":"string","description":"The comment text without a severity prefix."},"supersedes_thread_ids":{"type":"array","items":{"type":"string"},"description":"Exact thread_id values for unresolved previous seidroid findings replaced by this new inline comment. Empty array for a new finding."}},"required":["path","line","severity","body","supersedes_thread_ids"]}}},"required":["verdict","summary","blockers","non_blockers","pre_existing_issues","resolved_thread_ids","inline_comments"]}'
 
       - name: Post the combined review and report verdict as a check run
         # Run on review success AND failure (to report the verdict), but NOT when the run
@@ -747,6 +760,7 @@ jobs:
         env:
           STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
           APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
+          INCLUDE_NITS: ${{ needs.preflight.outputs.include_nits }}
           PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
           HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           SEIDROID_USER_ID: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
@@ -754,6 +768,7 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token || github.token }}
           script: |
             const approveOnSuccess = String(process.env.APPROVE_ON_SUCCESS || "true") === "true";
+            const includeNits = String(process.env.INCLUDE_NITS || "false") === "true";
             const number = Number(process.env.PR_NUMBER);
             const sha = process.env.HEAD_SHA;
 
@@ -762,6 +777,10 @@ jobs:
             try { parsed = JSON.parse(process.env.STRUCTURED_OUTPUT || ""); }
             catch (e) { core.warning(`Could not parse structured_output: ${e.message}`); }
             const haveOutput = parsed && typeof parsed === "object";
+            const stripSeverityTags = (body) => String(body || "").replace(
+              /^(?:\s*(?:\*\*)?\[(?:blocker|suggestion|nit)\](?:\*\*)?\s*)+/i,
+              "",
+            ).trim();
 
             let verdict = String(parsed?.verdict ?? "").trim().toLowerCase();
             const VALID = ["success", "neutral", "failure"];
@@ -771,7 +790,18 @@ jobs:
             }
             const summary = String(parsed?.summary ?? "").trim();
             const blockers = Array.isArray(parsed?.blockers) ? parsed.blockers.map(s => String(s).trim()).filter(Boolean) : [];
-            const nonBlockers = Array.isArray(parsed?.non_blockers) ? parsed.non_blockers.map(s => String(s).trim()).filter(Boolean) : [];
+            const nonBlockers = Array.isArray(parsed?.non_blockers)
+              ? parsed.non_blockers.map(finding => typeof finding === "string"
+                ? { severity: "suggestion", body: stripSeverityTags(finding) }
+                : {
+                    severity: String(finding?.severity ?? "suggestion").toLowerCase() === "nit"
+                      ? "nit"
+                      : "suggestion",
+                    body: stripSeverityTags(finding?.body),
+                  }).filter(finding =>
+                  finding.body && (includeNits || finding.severity !== "nit")
+                )
+              : [];
             const preExisting = Array.isArray(parsed?.pre_existing_issues)
               ? parsed.pre_existing_issues.map(issue => ({
                   severity: String(issue?.severity ?? "suggestion").toLowerCase() === "blocker"
@@ -790,10 +820,6 @@ jobs:
               const v = String(s || "suggestion").toLowerCase();
               return v === "blocker" ? "**[blocker]** " : v === "nit" ? "**[nit]** " : "**[suggestion]** ";
             };
-            const stripSeverityTags = (body) => String(body || "").replace(
-              /^(?:\s*(?:\*\*)?\[(?:blocker|suggestion|nit)\](?:\*\*)?\s*)+/i,
-              "",
-            ).trim();
 
             // ---- 2) Build a commentable-line index from the actual PR diff ----
             const valid = { RIGHT: {}, LEFT: {} };
@@ -831,7 +857,7 @@ jobs:
                   ? c.supersedes_thread_ids.map(s => String(s).trim()).filter(Boolean)
                   : []
               )];
-              if (!path || !body) continue;
+              if (!path || !body || (!includeNits && severity === "nit")) continue;
               const anchorable = Number.isInteger(lineNum) && valid[side][path]?.has(lineNum);
               if (anchorable) reviewComments.push({
                 path, line: lineNum, side, severity, body, supersedesThreadIds,
@@ -867,7 +893,7 @@ jobs:
               if (preExistingBlockers) L.push(`- _${preExistingBlockers} critical pre-existing blocker(s) listed below under pre-existing issues._`);
 
               L.push("", "### Non-blocking");
-              if (nonBlockers.length) nonBlockers.forEach(n => L.push(`- ${n}`));
+              if (nonBlockers.length) nonBlockers.forEach(n => L.push(`- ${tag(n.severity)}${n.body}`));
               else L.push("- _None at the file/PR level._");
               if (inlineOther) L.push(`- _${inlineOther} suggestion(s)/nit(s) flagged inline on specific lines._`);
               if (preExistingOther) L.push(`- _${preExistingOther} non-blocking pre-existing issue(s) listed below under pre-existing issues._`);

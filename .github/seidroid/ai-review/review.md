@@ -66,6 +66,9 @@ branch, classify it as pre-existing and keep it separate from PR-introduced find
 Keep nits rare. Omit subjective style preferences, harmless naming differences, minor
 wording choices, and formatting that automated tooling can handle. Include a nit only
 when it has a concrete readability or maintenance impact and a local, actionable fix.
+The workflow supplies `INCLUDE NITS` above this prompt. When it is `false`, omit all
+nit-level findings from both `non_blockers` and `inline_comments`. Do not promote a nit
+to a suggestion to bypass this setting.
 
 ## STEP 5 — Sort EVERY finding into exactly one bucket
 
@@ -84,8 +87,10 @@ when it has a concrete readability or maintenance impact and a local, actionable
   comment replaces. Use `[]` for a new finding.
 
 **B) NOT tied to a single line** (cross-cutting, missing tests, design, general
-observations) → `blockers` (must-fix) or `non_blockers` (suggestions/nits). Each entry is
-one short bullet.
+observations) → `blockers` (must-fix) or `non_blockers` (suggestions/nits). Each
+`non_blockers` entry has:
+- `severity`: `"suggestion"` or `"nit"`.
+- `body`: one short bullet without a severity prefix.
 
 **C) Already present on the base branch** → `pre_existing_issues`. Each entry has:
 - `severity`: `"blocker"` or `"suggestion"`. Use `"blocker"` only for a critical bug, such

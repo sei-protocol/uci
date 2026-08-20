@@ -57,6 +57,7 @@ jobs:
       # extra-instructions: "Flag added allocations in the hot path."
       # prebuild-script: "go mod download"   # warm Codex's offline sandbox
       # re-review-on-push: true         # review again after every PR push
+      # nitpick-label: 'ai: nitpick'     # only PRs with this label receive nits
 ```
 
 | Input | Default | Notes |
@@ -67,6 +68,8 @@ jobs:
 | `extra-instructions` | `''` | Appended to the scout + review prompts. |
 | `prebuild-script` | `''` | Shell run in scout jobs before the tool (e.g. warm offline deps). |
 | `guidelines-file` | `REVIEW.md` | Base-branch guidelines file to load. |
+| `skip-review-label` | `ai: skip-review` | Skip the entire review when this label is present. |
+| `nitpick-label` | `ai: nitpick` | Include nit-level findings only when this label is present. |
 | `trigger-phrase` | `@seidroid` | Exact `<trigger-phrase> review` command used to request another review. |
 | `allowed-team` | `sei-protocol/sei-core` | Active members may request another review. Empty denies everyone. |
 | `runs-on` | `ubuntu-latest` | Runner label. |
