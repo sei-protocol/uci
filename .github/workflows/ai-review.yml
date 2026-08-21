@@ -104,13 +104,14 @@ on:
         type: number
         default: 15
 
-permissions: {}
+permissions: { }
 
 concurrency:
-  # Pull-request updates supersede in-flight work. Comment events never cancel an active
-  # review: concurrency is acquired before preflight can reject unrelated comments.
+  # Serialize reviews per PR so automatic and explicit runs cannot race when posting,
+  # dismissing previous findings, or updating the AI Review check.
   group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -128,18 +129,21 @@ jobs:
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
           github.event.comment.user.type != 'Bot' &&
-          contains(github.event.comment.body, inputs.trigger-phrase)
+          contains(github.event.comment.body, inputs.trigger-phrase) &&
+          contains(github.event.comment.body, 'review')
         ) ||
         (
           github.event_name == 'pull_request_review_comment' &&
           github.event.comment.user.type != 'Bot' &&
-          contains(github.event.comment.body, inputs.trigger-phrase)
+          contains(github.event.comment.body, inputs.trigger-phrase) &&
+          contains(github.event.comment.body, 'review')
         ) ||
         (
           github.event_name == 'pull_request_review' &&
           github.event.review.user.type != 'Bot' &&
           github.event.review.body &&
-          contains(github.event.review.body, inputs.trigger-phrase)
+          contains(github.event.comment.body, inputs.trigger-phrase) &&
+          contains(github.event.comment.body, 'review')
         )
       }}
     permissions:
@@ -685,7 +689,7 @@ jobs:
   # ---------------------------------------------------------------------------
   claude_review:
     name: Claude
-    needs: [preflight, codex_review, cursor_review]
+    needs: [ preflight, codex_review, cursor_review ]
     runs-on: ${{ inputs.runs-on }}
     # `!cancelled()` lets this run when a scout is toggled off or fails. `should_run`
     # carries the preflight's draft/label/history/authorization decision to every pass.
@@ -1078,7 +1082,7 @@ jobs:
 
   complete_review_reaction:
     name: Complete review reaction
-    needs: [preflight, codex_review, cursor_review, claude_review]
+    needs: [ preflight, codex_review, cursor_review, claude_review ]
     if: ${{ always() && needs.preflight.outputs.reaction_subject_id != '' }}
     runs-on: ${{ inputs.runs-on }}
     permissions:
