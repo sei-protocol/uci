@@ -107,9 +107,16 @@ on:
 permissions: {}
 
 concurrency:
-  # Pull-request updates supersede in-flight work. Comment events never cancel an active
-  # review: concurrency is acquired before preflight can reject unrelated comments.
-  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  # Collapse automatic reviews after rapid pushes, but isolate each explicit request so
+  # a push or another comment cannot cancel it before preflight processes it.
+  group: >-
+    ai-review-${{ github.event.pull_request.number || github.event.issue.number }}-${{
+      github.event_name == 'pull_request' &&
+      'automatic' ||
+      github.event.comment.id ||
+      github.event.review.id ||
+      github.run_id
+    }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -128,18 +135,18 @@ jobs:
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
           github.event.comment.user.type != 'Bot' &&
-          contains(github.event.comment.body, inputs.trigger-phrase)
+          contains(github.event.comment.body, format('{0} review', inputs.trigger-phrase))
         ) ||
         (
           github.event_name == 'pull_request_review_comment' &&
           github.event.comment.user.type != 'Bot' &&
-          contains(github.event.comment.body, inputs.trigger-phrase)
+          contains(github.event.comment.body, format('{0} review', inputs.trigger-phrase))
         ) ||
         (
           github.event_name == 'pull_request_review' &&
           github.event.review.user.type != 'Bot' &&
           github.event.review.body &&
-          contains(github.event.review.body, inputs.trigger-phrase)
+          contains(github.event.review.body, format('{0} review', inputs.trigger-phrase))
         )
       }}
     permissions:
