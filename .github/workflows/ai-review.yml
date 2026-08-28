@@ -78,6 +78,11 @@ on:
         required: false
         type: string
         default: 'sei-protocol/sei-core'
+      allowed-bots:
+        description: "Comma- or whitespace-separated GitHub bot logins allowed to request re-reviews. Empty denies all bots."
+        required: false
+        type: string
+        default: ''
       runs-on:
         description: "Runner label."
         required: false
@@ -120,27 +125,25 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ${{ inputs.runs-on }}
-    # Comment events are cheap-filtered here, then exact command parsing and authorization
-    # happen in `resolve`. Non-command comments never reach a model.
+    # Comment events are cheap-filtered here, then exact command parsing and human-team
+    # or bot-allowlist authorization happen in `resolve`. Non-command comments never
+    # reach a model.
     if: >-
       ${{
         github.event_name == 'pull_request' ||
         (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
-          github.event.comment.user.type != 'Bot' &&
           contains(github.event.comment.body, inputs.trigger-phrase) &&
           contains(github.event.comment.body, 'review')
         ) ||
         (
           github.event_name == 'pull_request_review_comment' &&
-          github.event.comment.user.type != 'Bot' &&
           contains(github.event.comment.body, inputs.trigger-phrase) &&
           contains(github.event.comment.body, 'review')
         ) ||
         (
           github.event_name == 'pull_request_review' &&
-          github.event.review.user.type != 'Bot' &&
           github.event.review.body &&
           contains(github.event.review.body, inputs.trigger-phrase) &&
           contains(github.event.review.body, 'review')
@@ -203,6 +206,7 @@ jobs:
         env:
           TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
+          ALLOWED_BOTS: ${{ inputs.allowed-bots }}
           SKIP_REVIEW_LABEL: ${{ inputs.skip-review-label }}
           NITPICK_LABEL: ${{ inputs.nitpick-label }}
           SEIDROID_USER_ID: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
@@ -291,9 +295,11 @@ jobs:
             const body = eventName === "pull_request_review"
               ? context.payload.review?.body
               : context.payload.comment?.body;
-            const actor = eventName === "pull_request_review"
-              ? context.payload.review?.user?.login
-              : context.payload.comment?.user?.login;
+            const author = eventName === "pull_request_review"
+              ? context.payload.review?.user
+              : context.payload.comment?.user;
+            const actor = author?.login;
+            const actorType = author?.type;
             const normalize = value => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
             const command = `${normalize(process.env.TRIGGER_PHRASE)} review`;
             if (normalize(body) !== command || !actor) {
@@ -302,21 +308,34 @@ jobs:
             }
 
             let authorized = false;
-            const team = String(process.env.ALLOWED_TEAM || "");
-            const slash = team.indexOf("/");
-            if (slash > 0 && slash < team.length - 1) {
-              const org = team.slice(0, slash);
-              const team_slug = team.slice(slash + 1);
-              try {
-                const membership = await github.rest.teams.getMembershipForUserInOrg({
-                  org, team_slug, username: actor,
-                });
-                authorized = membership.data.state === "active";
-              } catch (error) {
-                core.notice(`Could not verify active membership for ${actor} in ${team}; denying request.`);
+            if (actorType === "Bot") {
+              const allowedBots = new Set(
+                String(process.env.ALLOWED_BOTS || "")
+                  .split(/[\s,]+/)
+                  .map(login => login.trim().toLowerCase())
+                  .filter(Boolean)
+              );
+              authorized = allowedBots.has(actor.toLowerCase());
+              if (!authorized) {
+                core.notice(`${actor} is not in allowed-bots; denying request.`);
               }
             } else {
-              core.notice("allowed-team is empty or invalid; denying request.");
+              const team = String(process.env.ALLOWED_TEAM || "");
+              const slash = team.indexOf("/");
+              if (slash > 0 && slash < team.length - 1) {
+                const org = team.slice(0, slash);
+                const team_slug = team.slice(slash + 1);
+                try {
+                  const membership = await github.rest.teams.getMembershipForUserInOrg({
+                    org, team_slug, username: actor,
+                  });
+                  authorized = membership.data.state === "active";
+                } catch (error) {
+                  core.notice(`Could not verify active membership for ${actor} in ${team}; denying request.`);
+                }
+              } else {
+                core.notice("allowed-team is empty or invalid; denying request.");
+              }
             }
 
             core.setOutput("should_run", String(authorized));
