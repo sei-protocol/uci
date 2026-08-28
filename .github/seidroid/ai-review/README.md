@@ -54,7 +54,7 @@ jobs:
     with:
       uci-ref: v1
       # allowed-team: my-org/my-team   # default: sei-protocol/sei-core
-      # allowed-bots: 'dependabot[bot],renovate[bot]' # exact logins; default: deny all bots
+      # allowed-bots: '["dependabot[bot]", "renovate[bot]"]' # exact logins; default: []
       # extra-instructions: "Flag added allocations in the hot path."
       # prebuild-script: "go mod download"   # warm Codex's offline sandbox
       # re-review-on-push: true         # review again after every PR push
@@ -73,7 +73,7 @@ jobs:
 | `nitpick-label` | `ai: nitpick` | Include nit-level findings only when this label is present. |
 | `trigger-phrase` | `@seidroid` | Exact `<trigger-phrase> review` command used to request another review. |
 | `allowed-team` | `sei-protocol/sei-core` | Active members may request another review. Empty denies everyone. |
-| `allowed-bots` | `''` | Comma- or whitespace-separated exact GitHub bot logins allowed to request another review. Empty denies all bots. |
+| `allowed-bots` | `'[]'` | JSON array of exact GitHub bot logins allowed to request another review. An empty array denies all bots. |
 | `runs-on` | `ubuntu-latest` | Runner label. |
 | `claude-model` | `''` | Optional Claude model override. |
 | `approve-on-success` | `true` | If true, APPROVE on a clean verdict; else COMMENT. |
@@ -139,7 +139,8 @@ jobs:
 - An exact `@seidroid review` comment is reserved for the review workflow, so the assistant
   ignores it. Human re-review requests are accepted only from active members of
   `allowed-team`; bot requests require an exact, case-insensitive login match in
-  `allowed-bots`. Membership lookup errors and empty allowlists fail closed.
+  the `allowed-bots` JSON array. Non-allowlisted bots are rejected before a runner starts.
+  Membership lookup errors and empty allowlists fail closed.
 - The assistant is gated to active members of `allowed-team` (checked before any model
   runs) and ignores bot-authored comments. It is read-only unless `allow-write` is set.
 - Untrusted PR/comment content is passed to the models as **data**, never interpolated

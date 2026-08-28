@@ -79,10 +79,10 @@ on:
         type: string
         default: 'sei-protocol/sei-core'
       allowed-bots:
-        description: "Comma- or whitespace-separated GitHub bot logins allowed to request re-reviews. Empty denies all bots."
+        description: "JSON array of GitHub bot logins allowed to request re-reviews. An empty array denies all bots."
         required: false
         type: string
-        default: ''
+        default: '[]'
       runs-on:
         description: "Runner label."
         required: false
@@ -128,22 +128,35 @@ jobs:
     # Comment events are cheap-filtered here, then exact command parsing and human-team
     # or bot-allowlist authorization happen in `resolve`. Non-command comments never
     # reach a model.
+    # `allowed-bots` is JSON so `contains` checks array membership rather than substrings.
     if: >-
       ${{
         github.event_name == 'pull_request' ||
         (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
+          (
+            github.event.comment.user.type != 'Bot' ||
+            contains(fromJSON(inputs.allowed-bots), github.event.comment.user.login)
+          ) &&
           contains(github.event.comment.body, inputs.trigger-phrase) &&
           contains(github.event.comment.body, 'review')
         ) ||
         (
           github.event_name == 'pull_request_review_comment' &&
+          (
+            github.event.comment.user.type != 'Bot' ||
+            contains(fromJSON(inputs.allowed-bots), github.event.comment.user.login)
+          ) &&
           contains(github.event.comment.body, inputs.trigger-phrase) &&
           contains(github.event.comment.body, 'review')
         ) ||
         (
           github.event_name == 'pull_request_review' &&
+          (
+            github.event.review.user.type != 'Bot' ||
+            contains(fromJSON(inputs.allowed-bots), github.event.review.user.login)
+          ) &&
           github.event.review.body &&
           contains(github.event.review.body, inputs.trigger-phrase) &&
           contains(github.event.review.body, 'review')
@@ -309,11 +322,10 @@ jobs:
 
             let authorized = false;
             if (actorType === "Bot") {
+              const configuredBots = JSON.parse(process.env.ALLOWED_BOTS || "[]");
               const allowedBots = new Set(
-                String(process.env.ALLOWED_BOTS || "")
-                  .split(/[\s,]+/)
-                  .map(login => login.trim().toLowerCase())
-                  .filter(Boolean)
+                (Array.isArray(configuredBots) ? configuredBots : [])
+                  .map(login => String(login).toLowerCase())
               );
               authorized = allowedBots.has(actor.toLowerCase());
               if (!authorized) {
