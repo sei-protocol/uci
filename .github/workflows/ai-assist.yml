@@ -9,7 +9,7 @@ on:
 jobs:
   assistant:
     # See: https://github.com/sei-protocol/uci/releases/tag/v0.0.17
-    uses: sei-protocol/uci/.github/workflows/ai-assistant.yml@1d50ef2bd27c695493f254c3037eb6b78f9bb85f
+    uses: sei-protocol/uci/.github/workflows/ai-assistant.yml@68010d0ab76554da91c320511fb14a7af1af4245
     permissions:
       contents: read
       pull-requests: write
