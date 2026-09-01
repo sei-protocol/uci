@@ -776,6 +776,7 @@ jobs:
           anthropic_service_account_id: ${{ vars.PLATFORM_CODE_AGENT_ANTHROPIC_SVAC_ID }}
           bot_id: ${{ vars.PLATFORM_CODE_AGENT_USER_ID }}
           bot_name: 'seidroid[bot]'
+          allowed_bots: ${{ inputs.allowed-bots != '' && join(fromJSON(inputs.allowed-bots), ',') || '' }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ needs.preflight.outputs.pr_number }}
