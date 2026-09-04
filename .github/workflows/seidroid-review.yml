@@ -1,5 +1,5 @@
 name: seidroid review
-run-name: UCI / seidroid review / ${{ github.event.issue.number && format('#{0}', github.event.issue.number) || github.ref_name }}
+run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event.pull_request.number) && format('#{0}', github.event.issue.number || github.event.pull_request.number) || github.ref_name }}
 # Reusable, comment-triggered agentic PR review, driven by the sei-agent-driver
 # binary from sei-protocol/sei-internal-skills. That module is where the reviewer's
 # logic and its prompt live; this file is the GitHub wiring around it, and the two
@@ -9,11 +9,15 @@ run-name: UCI / seidroid review / ${{ github.event.issue.number && format('#{0}'
 # -> guard gate -> install and run the driver over one managed omnigent session ->
 # post one sticky verdict, the findings it can place, and a check run.
 #
-# MANUAL ONLY, deliberately. There is no `pull_request` trigger and callers must not
-# add one: a review costs model spend and holds a sandbox, so it happens because a
-# person asked for it. `ai-review.yml` beside this file is the automatic path; this
-# is not a second copy of it, and the two are expected to run side by side during the
-# transition -- see the check name below.
+# TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
+# wires that trigger and passes `mode: review`. A MANUAL one runs when a person
+# comments `@seidroid review`. Both spend model quota and hold a sandbox, so both are
+# gated -- see the guard below: the automatic path refuses a draft and honours the
+# skip-review label, and the manual path additionally checks who is asking.
+#
+# This file is the automation of record. It REPLACES `ai-review.yml` rather than
+# running beside it; a repository that wires the automatic path here should retire
+# that caller in the same change, or every pull request is reviewed twice.
 #
 # The driver is installed with `go install` at `driver-version`, which the caller pins,
 # so a caller updates by bumping one ref and this file never copies driver logic. The session is
@@ -92,9 +96,10 @@ on:
       approve-on-success:
         description: >-
           Approve the pull request when the review concludes clean. Off by
-          default: ai-review is the automation of record and this one is asked for
-          by hand, so a run should not clear a review requirement until it is the
-          one being relied on. A blocking conclusion requests changes either way.
+          default: clearing a human review requirement is the repository's policy
+          decision, not this file's, so a clean run stays silent until the
+          repository has decided it may approve. A blocking conclusion requests
+          changes either way.
         required: false
         type: boolean
         default: false
@@ -279,15 +284,24 @@ jobs:
     # API state, so a minute is generous.
     timeout-minutes: 5
     permissions: {}
-    # Runs for any comment-triggered dispatch, review or close, because what it
-    # decides is whether the commenter may command this workflow at all. Routing is
-    # the caller's: it reads the body and passes the mode. A close arriving as a
+    # Runs for an automatic pull_request review, and for any comment-triggered
+    # dispatch, review or close. For a comment it decides whether the commenter may
+    # command this workflow at all; for an automatic review it decides whether the
+    # pull request is in a state worth spending a sandbox on. Routing is the
+    # caller's: it reads the body and passes the mode. A close arriving as a
     # pull_request event skips the guard, since GitHub's own event is the authority.
+    #
+    # The pull_request branch carries no author-association check, matching the path
+    # this file replaces: the event is the push itself rather than a person's
+    # command, and GitHub withholds this workflow's secrets from a fork pull request
+    # regardless -- such a run fails the machine-client check below and reviews
+    # nothing, rather than running an agent over unauthorised code.
     if: >-
-      ${{ github.event_name == 'issue_comment' &&
+      ${{ (github.event_name == 'pull_request' && inputs.mode == 'review') ||
+      (github.event_name == 'issue_comment' &&
       github.event.issue.pull_request != null &&
       github.event.comment.user.type != 'Bot' &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) }}
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) }}
     outputs:
       should_run: ${{ steps.parse.outputs.should_run == 'true' && steps.admit.outputs.admit == 'true' }}
       pr_number: ${{ steps.parse.outputs.pr_number }}
@@ -306,10 +320,27 @@ jobs:
         env:
           BODY: ${{ github.event.comment.body }}
           REPO_OWNER: ${{ github.repository_owner }}
-          PR_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # An automatic review has no comment to parse: the event IS the request, and
+          # the job condition above has already established which event this is. It
+          # reports the same outputs the command grammar below produces, so every
+          # later step reads one shape and no step needs a second code path.
+          #
+          # No target, deliberately. Reviewing ELSEWHERE is a thing a person asks for
+          # by naming it; an automatic run always reviews the pull request it fired on.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            {
+              echo "should_run=true"
+              echo "pr_number=$PR_NUMBER"
+              echo "command=review"
+              echo "comment_id="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           cmd="$(printf '%s' "$BODY" | tr -d '\r')"
           # Require a LINE reading `@seidroid review`, optionally `close`, optionally
           # followed by one `owner/name#number` naming a pull request ELSEWHERE.
@@ -410,9 +441,11 @@ jobs:
           SKIP_LABEL: ${{ inputs.skip-review-label }}
           ACTOR: ${{ github.event.comment.user.login }}
           REPO: ${{ steps.parse.outputs.review_repo || github.repository }}
-          PR: ${{ steps.parse.outputs.review_pr || github.event.issue.number }}
+          PR: ${{ steps.parse.outputs.review_pr || steps.parse.outputs.pr_number }}
           PARSED: ${{ steps.parse.outputs.should_run }}
           COMMAND: ${{ steps.parse.outputs.command }}
+          EVENT_NAME: ${{ github.event_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -uo pipefail
           deny() { echo "::notice::$1"; echo "admit=false" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -421,11 +454,27 @@ jobs:
             exit 0
           fi
 
+          # A draft is not ready to be read, and on the automatic path every push to
+          # one would otherwise spend a sandbox for a review nobody asked for. Read
+          # from the event payload rather than the API, so it needs no identity and
+          # cannot fail open when none is configured.
+          #
+          # The manual path skips this check on purpose: commenting `@seidroid review`
+          # on a draft is a direct request, and refusing it would be surprising.
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$IS_DRAFT" = "true" ]; then
+            deny "$REPO#$PR is a draft; not reviewing"
+          fi
+
           # Membership is a security control, so it fails closed: asked for and
           # unanswerable means denied. The job condition has already required an
           # OWNER/MEMBER/COLLABORATOR association, which admits any collaborator on
           # the repository the request was made in; a team narrows that.
-          if [ -n "$ALLOWED_TEAM" ]; then
+          #
+          # It gates who may COMMAND a review, so it applies to the comment path only.
+          # An automatic run has no commander: applying the team check there would
+          # silently stop reviewing every pull request opened by anyone outside the
+          # team, which is the opposite of what a caller sets this input for.
+          if [ "$EVENT_NAME" != "pull_request" ] && [ -n "$ALLOWED_TEAM" ]; then
             case "$ALLOWED_TEAM" in
               */*) ;;
               *) deny "allowed-team is not org/team-slug; denying" ;;
@@ -485,10 +534,13 @@ jobs:
     #
     # !cancelled() is still needed because the close path SKIPS the guard, and a
     # skipped dependency would otherwise skip this too. Each path names the guard
-    # result it expects, so neither admits the other's.
+    # result it expects, so neither admits the other's: a pull_request REVIEW is
+    # guarded, because that is where draft and skip-label are decided, while a
+    # pull_request CLOSE is not guarded at all.
     if: >-
       ${{ !cancelled() && (
-      (github.event_name == 'issue_comment' &&
+      ((github.event_name == 'issue_comment' ||
+        (github.event_name == 'pull_request' && inputs.mode == 'review')) &&
         needs.guard.result == 'success' &&
         needs.guard.outputs.should_run == 'true') ||
       (github.event_name == 'pull_request' &&
