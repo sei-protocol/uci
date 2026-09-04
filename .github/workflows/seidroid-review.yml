@@ -882,6 +882,10 @@ jobs:
           : > "$NOTE"
           if [ ! -s "$FINDINGS" ]; then
             echo "no findings to place; the summary carries the review"
+            # Zero, and not silence. Nothing was placed because there was nothing to
+            # place, which is a number the summary can state. A step that was skipped
+            # writes nothing at all, and the summary tells the two apart by that.
+            { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # The commit the review actually read, recorded before it started. Absent
@@ -933,6 +937,14 @@ jobs:
             } > "$NOTE.tmp"
             mv "$NOTE.tmp" "$NOTE"
           fi
+          # Here and at the early exit above, and nowhere between: the two points where
+          # these are final. A run that dies in between leaves them unwritten, which is
+          # the right answer there -- placement neither finished nor was skipped, so no
+          # number it could publish would be true.
+          #
+          # One append for all three, so the summary never reads a half-written set. It
+          # requires all three for that reason, including the one no term renders.
+          { echo "on_line=$on_line"; echo "on_file=$on_file"; echo "unplaced=$unplaced"; } >> "$GITHUB_OUTPUT"
           echo "findings: $on_line on a line, $on_file on a file, $unplaced in the summary"
 
       - name: Publish the review check run
@@ -1080,7 +1092,13 @@ jobs:
         # Keying on verdict_produced, not the exit code, so a teardown-only
         # failure still posts a valid verdict and a no-verdict run never
         # upserts a placeholder.
+        #
+        # continue-on-error, like every other publish step. This one is the last thing
+        # standing between a finished review and the reader, and failing the job here
+        # throws that review away rather than saving it. What it costs is the signal,
+        # so the run block states the failure itself; see there.
         if: ${{ inputs.mode == 'review' && (!cancelled() && steps.drive.outputs.verdict_produced == 'true') }}
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
@@ -1095,20 +1113,202 @@ jobs:
           # Findings the step above could place nowhere on the diff. Empty when it
           # placed them all, and when it was skipped for a cross-repository review.
           NOTE: ${{ steps.place.outputs.note_path }}
+          # What the driver counted, for the findings line below. Read rather than
+          # recomputed here: the driver derived the check run's conclusion from these
+          # same findings, and a second derivation is a second thing that can disagree.
+          CHECK: ${{ steps.drive.outputs.check_path }}
+          # What the step above placed. Empty, not zero, when that step was skipped for a
+          # cross-repository review or died partway -- and the difference is the point.
+          # "0 posted inline" over a placement that never ran is a lie about the review.
+          ON_LINE: ${{ steps.place.outputs.on_line }}
+          ON_FILE: ${{ steps.place.outputs.on_file }}
+          UNPLACED: ${{ steps.place.outputs.unplaced }}
+          # The commit the review read, for the failure check below. Recorded before
+          # the review started; absent only when that read failed, and then the
+          # annotation is the only record.
+          REVIEWED_SHA: ${{ steps.head.outputs.sha }}
+          # GitHub rejects an issue comment over 65,536 characters. The driver bounds
+          # the verdict it writes and clips its own text to fit (review.MaxBodyBytes,
+          # 60,000). Nothing bounds $NOTE: it carries Finding.Detail, raw model prose
+          # with no length constraint on it. Unbounded, a long tail of unplaced
+          # findings pushes the body past the cap and the upsert below is rejected --
+          # losing a whole review over its least important part.
+          #
+          # Bytes, not characters, for the reason the driver counts bytes: a byte count
+          # is never lower than a rune count, so a body inside this bound is inside
+          # GitHub's limit whichever unit that limit turns out to count.
+          MAX_BODY_BYTES: 65536
+          # Held back from the note's budget for the truncation notice, which is
+          # written after the cut point is chosen and so cannot be measured before it.
+          NOTICE_BYTES: 256
         run: |
           set -euo pipefail
           body="$MARKER"$'\n'"$(cat "$VERDICT")"
+
+          # The findings line, in the shape ai-review posts, so a reader moving between
+          # the two reviewers during the transition reads one format. Assembled here
+          # rather than in the driver because half of it is the placement above, which
+          # the driver never sees.
+          #
+          # It is appended before the note block below, and that ordering is load-bearing
+          # twice. It puts the line under the review's prose, where the format wants it.
+          # And the note's byte budget measures $body to decide what room is left, so a
+          # line added after that measurement is a line nothing accounted for -- and what
+          # it pushes past GitHub's cap is the whole review.
+          #
+          # Every term is dropped rather than guessed, and nothing here can fail the
+          # publish. A count this run cannot read costs the term; a line with no count
+          # left in it is not written at all.
+          is_count() { case "${1:-}" in (''|*[!0-9]*) return 1 ;; esac; }
+          line="" counted=false
+          add_term() { if [ -n "$line" ]; then line="$line | "; fi; line="$line$1"; }
+
+          # The driver's own totals, over every finding the review reported rather than
+          # over the ones that could be placed: a blocker naming no line is still a
+          # blocker, and a count that omitted it would read as a cleaner review than the
+          # one that ran.
+          #
+          # A driver older than these fields writes none of them and jq answers null. The
+          # sentinel makes that a value is_count rejects, so an old driver publishes the
+          # same comment with a shorter line that is still true.
+          blocking="" non_blocking="" pre_existing="" conclusion=""
+          if [ -s "${CHECK:-}" ]; then
+            read -r blocking non_blocking pre_existing conclusion < <(jq -r '[(.blocking // "?"),
+              (.non_blocking // "?"), (.pre_existing // "?"), (.conclusion // "?")] | @tsv' \
+              "$CHECK" 2>/dev/null) || true
+          fi
+          if is_count "$blocking" && is_count "$non_blocking"; then
+            add_term "$blocking blocking"
+            add_term "$non_blocking non-blocking"
+            counted=true
+          else
+            echo "::notice::this driver reports no finding counts, so the findings line \
+              omits them; it predates check.json's blocking and non_blocking fields"
+          fi
+
+          # Both placements the step above makes: on a line where the diff carries it, on
+          # the file where it does not. Both land in the pull request's file view, which
+          # is what "inline" means to the person reading it. What reached neither is not
+          # counted here -- the note below names those one by one under a heading of their
+          # own, which is more than a number would say.
+          if is_count "${ON_LINE:-}" && is_count "${ON_FILE:-}" && is_count "${UNPLACED:-}"; then
+            add_term "$(( ON_LINE + ON_FILE )) posted inline"
+            counted=true
+          else
+            add_term "inline placement did not run"
+            echo "::notice::no placement counts, so the findings line says so; that step \
+              is skipped for a cross-repository review and writes nothing if it dies"
+          fi
+
+          # Counted apart from both, and named. CheckConclusion excludes a pre-existing
+          # blocker from the gate on purpose -- it is already on the base branch, so
+          # failing on it would fail every pull request that touches the file, and the
+          # author who has to clear the check is the one person who did not cause it.
+          # Folded into "blocking" it would print a number the check run contradicts;
+          # folded into "non-blocking" it would tell an author their change has problems
+          # it does not have. Omitted at zero, which is most reviews.
+          if is_count "$pre_existing" && [ "$pre_existing" -gt 0 ]; then
+            add_term "$pre_existing pre-existing"
+          fi
+
+          # Two numbers about one review must not disagree. Both are the driver's, from
+          # the same findings, so a disagreement is a defect there rather than a case to
+          # render around. It is stated in the log and the line still prints what it was
+          # given: correcting either number here would publish a third answer and hide
+          # the bug that produced the first two.
+          if is_count "$blocking" && [ "$conclusion" = "failure" ] && [ "$blocking" -eq 0 ]; then
+            echo "::warning::the driver reported 0 blocking findings beside a failing \
+              check; this comment and the check run disagree"
+          elif is_count "$blocking" && [ "$conclusion" != "failure" ] && [ "$blocking" -gt 0 ]; then
+            echo "::warning::the driver reported $blocking blocking finding(s) beside a \
+              $conclusion check; this comment and the check run disagree"
+          fi
+
+          if [ "$counted" = true ]; then
+            body="$body"$'\n\n'"**Findings:** $line"
+          fi
+
           # A reader who sees no inline comment for an observation would otherwise
           # have to guess whether it was dropped.
+          #
+          # Bounded against what the marker and the verdict already spend, so the note
+          # can never be the thing that pushes the comment past GitHub's cap. Cut on
+          # whole lines: a byte cut can land inside a UTF-8 sequence or inside a
+          # finding's markdown, where a line cut can be counted and named.
           if [ -n "$NOTE" ] && [ -s "$NOTE" ]; then
-            body="$body"$'\n\n'"$(cat "$NOTE")"
+            room=$(( MAX_BODY_BYTES - $(printf '%s\n\n' "$body" | wc -c) ))
+            if [ "$(wc -c < "$NOTE")" -le "$room" ]; then
+              body="$body"$'\n\n'"$(cat "$NOTE")"
+            else
+              # Every line the place step writes for a finding opens with "- `".
+              total="$(grep -c '^- `' "$NOTE" || true)"
+              budget=$(( room - NOTICE_BYTES ))
+              kept=""
+              shown=0
+              if [ "$budget" -gt 0 ]; then
+                # sed drops the last line, which is the one the byte cut may have left
+                # half-written.
+                kept="$(head -c "$budget" "$NOTE" | sed '$d')"
+                shown="$(printf '%s\n' "$kept" | grep -c '^- `' || true)"
+              fi
+              if [ "$shown" -gt 0 ]; then
+                body="$body"$'\n\n'"$kept"
+              fi
+              body="$body"$'\n\n'"_Cut to stay inside GitHub's comment limit ($MAX_BODY_BYTES bytes): $shown of $total observation(s) are shown here. All $total are in this workflow run's log._"
+              echo "::warning::the summary note was cut to $shown of $total unplaced observation(s) to fit GitHub's comment limit; the full list follows"
+              cat "$NOTE"
+            fi
           fi
           # One bot comment per PR: find by marker -> PATCH, else POST. repo/pr from env,
           # not template-interpolated into the script.
-          id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
+          #
+          # Each call's failure is caught rather than left to `set -e`, so this step can
+          # say what was lost before it ends. A failed lookup does not fall through to
+          # POST: that leaves a second sticky comment behind, and one comment per pull
+          # request is this tool's whole contract with the reader.
+          posted=false
+          if id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                   --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"; then
+            if [ -n "$id" ]; then
+              if gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null; then posted=true; fi
+            else
+              if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then posted=true; fi
+            fi
+          fi
+          if [ "$posted" = true ]; then
+            echo "posted the verdict on $REPO#$PR"
+            exit 0
+          fi
+
+          # continue-on-error above is what stops a publishing failure from discarding a
+          # review that ran. It also removes the only signal there was, and a review that
+          # is silently absent is worse than a red job. So the failure is stated in two
+          # places, because neither alone is enough: an annotation on the run, which needs
+          # nothing but the runner; and the check run, which is the only one of the two
+          # that reaches the pull request, where the reader is waiting for a review that
+          # is not coming.
+          #
+          # The verdict goes to the log unposted, so the run still holds what the review
+          # cost model spend and a sandbox to produce.
+          bytes="$(printf '%s' "$body" | wc -c | tr -d '[:space:]')"
+          echo "::error::the review reached a verdict but it could not be posted on $REPO#$PR ($bytes bytes); it is in this step's log below"
+          echo "--- verdict, unposted ---"
+          printf '%s\n' "$body"
+          echo "--- end verdict ---"
+          # Under the same name as the check published above, so it supersedes that
+          # conclusion on this commit rather than sitting beside it, and so a later run
+          # that does post clears it. Best-effort: whatever stopped the comment can stop
+          # this too, and then the annotation stands alone.
+          if [ -n "${REVIEWED_SHA:-}" ]; then
+            gh api -X POST "repos/$REPO/check-runs" \
+              -f name=review \
+              -f head_sha="$REVIEWED_SHA" \
+              -f status=completed \
+              -f conclusion=failure \
+              -f output[title]="review produced but not published" \
+              -f output[summary]="The review ran and reached a verdict. Posting it to this pull request failed, so the verdict is not here. Read it in the workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              >/dev/null \
+              || echo "::warning::the failure check run could not be posted either; the annotation on this run is the only record"
           else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
+            echo "::warning::no reviewed commit was recorded, so there is no check run to fail; the annotation on this run is the only record"
           fi
