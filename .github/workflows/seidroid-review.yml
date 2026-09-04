@@ -1080,7 +1080,13 @@ jobs:
         # Keying on verdict_produced, not the exit code, so a teardown-only
         # failure still posts a valid verdict and a no-verdict run never
         # upserts a placeholder.
+        #
+        # continue-on-error, like every other publish step. This one is the last thing
+        # standing between a finished review and the reader, and failing the job here
+        # throws that review away rather than saving it. What it costs is the signal,
+        # so the run block states the failure itself; see there.
         if: ${{ inputs.mode == 'review' && (!cancelled() && steps.drive.outputs.verdict_produced == 'true') }}
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
@@ -1095,20 +1101,108 @@ jobs:
           # Findings the step above could place nowhere on the diff. Empty when it
           # placed them all, and when it was skipped for a cross-repository review.
           NOTE: ${{ steps.place.outputs.note_path }}
+          # The commit the review read, for the failure check below. Recorded before
+          # the review started; absent only when that read failed, and then the
+          # annotation is the only record.
+          REVIEWED_SHA: ${{ steps.head.outputs.sha }}
+          # GitHub rejects an issue comment over 65,536 characters. The driver bounds
+          # the verdict it writes and clips its own text to fit (review.MaxBodyBytes,
+          # 60,000). Nothing bounds $NOTE: it carries Finding.Detail, raw model prose
+          # with no length constraint on it. Unbounded, a long tail of unplaced
+          # findings pushes the body past the cap and the upsert below is rejected --
+          # losing a whole review over its least important part.
+          #
+          # Bytes, not characters, for the reason the driver counts bytes: a byte count
+          # is never lower than a rune count, so a body inside this bound is inside
+          # GitHub's limit whichever unit that limit turns out to count.
+          MAX_BODY_BYTES: 65536
+          # Held back from the note's budget for the truncation notice, which is
+          # written after the cut point is chosen and so cannot be measured before it.
+          NOTICE_BYTES: 256
         run: |
           set -euo pipefail
           body="$MARKER"$'\n'"$(cat "$VERDICT")"
           # A reader who sees no inline comment for an observation would otherwise
           # have to guess whether it was dropped.
+          #
+          # Bounded against what the marker and the verdict already spend, so the note
+          # can never be the thing that pushes the comment past GitHub's cap. Cut on
+          # whole lines: a byte cut can land inside a UTF-8 sequence or inside a
+          # finding's markdown, where a line cut can be counted and named.
           if [ -n "$NOTE" ] && [ -s "$NOTE" ]; then
-            body="$body"$'\n\n'"$(cat "$NOTE")"
+            room=$(( MAX_BODY_BYTES - $(printf '%s\n\n' "$body" | wc -c) ))
+            if [ "$(wc -c < "$NOTE")" -le "$room" ]; then
+              body="$body"$'\n\n'"$(cat "$NOTE")"
+            else
+              # Every line the place step writes for a finding opens with "- `".
+              total="$(grep -c '^- `' "$NOTE" || true)"
+              budget=$(( room - NOTICE_BYTES ))
+              kept=""
+              shown=0
+              if [ "$budget" -gt 0 ]; then
+                # sed drops the last line, which is the one the byte cut may have left
+                # half-written.
+                kept="$(head -c "$budget" "$NOTE" | sed '$d')"
+                shown="$(printf '%s\n' "$kept" | grep -c '^- `' || true)"
+              fi
+              if [ "$shown" -gt 0 ]; then
+                body="$body"$'\n\n'"$kept"
+              fi
+              body="$body"$'\n\n'"_Cut to stay inside GitHub's comment limit ($MAX_BODY_BYTES bytes): $shown of $total observation(s) are shown here. All $total are in this workflow run's log._"
+              echo "::warning::the summary note was cut to $shown of $total unplaced observation(s) to fit GitHub's comment limit; the full list follows"
+              cat "$NOTE"
+            fi
           fi
           # One bot comment per PR: find by marker -> PATCH, else POST. repo/pr from env,
           # not template-interpolated into the script.
-          id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
+          #
+          # Each call's failure is caught rather than left to `set -e`, so this step can
+          # say what was lost before it ends. A failed lookup does not fall through to
+          # POST: that leaves a second sticky comment behind, and one comment per pull
+          # request is this tool's whole contract with the reader.
+          posted=false
+          if id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                   --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"; then
+            if [ -n "$id" ]; then
+              if gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null; then posted=true; fi
+            else
+              if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then posted=true; fi
+            fi
+          fi
+          if [ "$posted" = true ]; then
+            echo "posted the verdict on $REPO#$PR"
+            exit 0
+          fi
+
+          # continue-on-error above is what stops a publishing failure from discarding a
+          # review that ran. It also removes the only signal there was, and a review that
+          # is silently absent is worse than a red job. So the failure is stated in two
+          # places, because neither alone is enough: an annotation on the run, which needs
+          # nothing but the runner; and the check run, which is the only one of the two
+          # that reaches the pull request, where the reader is waiting for a review that
+          # is not coming.
+          #
+          # The verdict goes to the log unposted, so the run still holds what the review
+          # cost model spend and a sandbox to produce.
+          bytes="$(printf '%s' "$body" | wc -c | tr -d '[:space:]')"
+          echo "::error::the review reached a verdict but it could not be posted on $REPO#$PR ($bytes bytes); it is in this step's log below"
+          echo "--- verdict, unposted ---"
+          printf '%s\n' "$body"
+          echo "--- end verdict ---"
+          # Under the same name as the check published above, so it supersedes that
+          # conclusion on this commit rather than sitting beside it, and so a later run
+          # that does post clears it. Best-effort: whatever stopped the comment can stop
+          # this too, and then the annotation stands alone.
+          if [ -n "${REVIEWED_SHA:-}" ]; then
+            gh api -X POST "repos/$REPO/check-runs" \
+              -f name=review \
+              -f head_sha="$REVIEWED_SHA" \
+              -f status=completed \
+              -f conclusion=failure \
+              -f output[title]="review produced but not published" \
+              -f output[summary]="The review ran and reached a verdict. Posting it to this pull request failed, so the verdict is not here. Read it in the workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              >/dev/null \
+              || echo "::warning::the failure check run could not be posted either; the annotation on this run is the only record"
           else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
+            echo "::warning::no reviewed commit was recorded, so there is no check run to fail; the annotation on this run is the only record"
           fi
