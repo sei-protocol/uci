@@ -1114,14 +1114,23 @@ jobs:
           if [ "$conclusion" = "failure" ]; then
             exit 0
           fi
-          { gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-            --jq "[.[] | select(.state == \"CHANGES_REQUESTED\" and ((.body // \"\") | startswith(\"$MARKER\")))] | .[].id" \
-            || echo "::warning::could not list the reviews to withdraw on $REPO#$PR"; } \
+          # Listed into a variable, not piped. A warning written into the pipe is read
+          # by the loop as a review id rather than seen by Actions as an annotation:
+          # the dismiss then fails on it, and pipefail fails the step the guard exists
+          # to survive. Reporting and data have to travel separately.
+          if ! ids="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+                        --jq "[.[] | select(.state == \"CHANGES_REQUESTED\" and ((.body // \"\") | startswith(\"$MARKER\")))] | .[].id")"; then
+            echo "::warning::could not list the reviews to withdraw on $REPO#$PR"
+            ids=""
+          fi
+          printf '%s\n' "$ids" \
           | while read -r id; do
               [ -n "$id" ] || continue
               gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$id/dismissals" \
                 -f message="Superseded: the latest review found nothing blocking." \
-                -f event=DISMISS >/dev/null && echo "withdrew review $id"
+                -f event=DISMISS >/dev/null \
+                && echo "withdrew review $id" \
+                || echo "::warning::could not withdraw review $id on $REPO#$PR"
             done
 
       - name: Answer the request
@@ -1169,9 +1178,12 @@ jobs:
           # delete.
           [ "$reaction" = "+1" ] && opposite="-1" || opposite="+1"
           me="github-actions[bot]"
-          { gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
-              --jq ".[] | select(.content == \"$opposite\" and .user.login == \"$me\") | .id" \
-              2>/dev/null || true; } \
+          # Listed into a variable rather than piped, so nothing this block reports can
+          # be read back as an id. Reporting and data travel separately.
+          mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+                    --jq ".[] | select(.content == \"$opposite\" and .user.login == \"$me\") | .id" \
+                    2>/dev/null || true)"
+          printf '%s\n' "$mine" \
           | while read -r rid; do
               [ -n "$rid" ] || continue
               gh api -X DELETE \
