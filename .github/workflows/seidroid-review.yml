@@ -1066,21 +1066,28 @@ jobs:
             echo "no conclusion to take a position from"
             exit 0
           fi
-          conclusion="$(jq -r .conclusion "$CHECK")"
-          # Against the head the review read, so the position cannot attach to code
-          # it never saw.
-          # The commit the review actually read, recorded before it started. Absent
-          # only when that read failed, in which case this falls back to the head now
-          # -- the weaker guarantee, announced rather than assumed.
+          # jq's error goes to the log and the value comes back on stdout, so a check
+          # file this step cannot read states itself rather than arriving as data.
+          #
+          # `// empty` rather than a bare field. A missing conclusion renders as the
+          # string "null", and every comparison below takes that for a conclusion.
+          conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
+          if [ -z "$conclusion" ]; then
+            echo "::warning::the check file names no conclusion; no position to take on $REPO#$PR"
+            exit 0
+          fi
+
+          # The commit the review read, recorded before it started. Empty only when
+          # that record failed, and then the position goes on the pull request's
+          # latest commit -- the weaker guarantee, stated rather than assumed.
+          #
+          # The head is not read again here. The step that publishes the check run
+          # runs whenever this one does, and reports a head that moved during the
+          # review; a second read would buy a duplicate annotation and cost the
+          # withdrawal below, because a failed read aborts the step under set -e.
           head_sha="${REVIEWED_SHA:-}"
-          now="$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)"
           if [ -z "$head_sha" ]; then
-            echo "::warning::the reviewed commit was not recorded; publishing against \
-              the current head $now, which the review may not have read"
-            head_sha="$now"
-          elif [ "$now" != "$head_sha" ]; then
-            echo "::warning::head moved from $head_sha to $now during the review; \
-              publishing against the reviewed commit"
+            echo "::warning::the reviewed commit was not recorded; the position goes on the current head of $REPO#$PR, which the review may not have read"
           fi
 
           event=""
@@ -1094,12 +1101,19 @@ jobs:
           fi
 
           if [ -n "$event" ]; then
-            # Guarded, because set -e would abort the step here and take the reaction
-            # and the withdrawal below with it. A 422 on self-approval, a stale
-            # commit_id or a transient 5xx must not also cost the reader the answer.
-            if gh api -X POST "repos/$REPO/pulls/$PR/reviews" \
-                 -f event="$event" -f commit_id="$head_sha" \
-                 -f body="$MARKER"$'\n'"$note" >/dev/null 2>&1; then
+            # commit_id is omitted rather than sent empty when the commit is unknown:
+            # the API rejects an empty one, and its own default is the pull request's
+            # latest commit, which is the fallback announced above.
+            args=(-X POST "repos/$REPO/pulls/$PR/reviews"
+                  -f event="$event" -f body="$MARKER"$'\n'"$note")
+            if [ -n "$head_sha" ]; then
+              args+=(-f commit_id="$head_sha")
+            fi
+            # Guarded, because set -e would abort the step here and take the
+            # withdrawal below with it. A 422 on self-approval, a stale commit_id or
+            # a transient 5xx must not also cost the pull request its retraction. The
+            # API's own error stays on stderr, where it says why.
+            if gh api "${args[@]}" >/dev/null; then
               echo "recorded $event on $REPO#$PR"
             else
               echo "::warning::could not record $event on $REPO#$PR; the verdict comment stands"
@@ -1111,27 +1125,33 @@ jobs:
           # An earlier block this run no longer stands behind. Left standing it
           # keeps a pull request red for a finding that is gone, and only a human
           # can clear it.
-          if [ "$conclusion" = "failure" ]; then
+          #
+          # A clean run only. A failure stands behind its own block. A neutral
+          # conclusion is what a review reaches when it cannot show it read the diff,
+          # so it has no ground to clear another review's finding -- and the dismissal
+          # message below would claim a reading that did not happen.
+          if [ "$conclusion" != "success" ]; then
             exit 0
           fi
-          # Listed into a variable, not piped. A warning written into the pipe is read
-          # by the loop as a review id rather than seen by Actions as an annotation:
-          # the dismiss then fails on it, and pipefail fails the step the guard exists
-          # to survive. Reporting and data have to travel separately.
+          # Listed into a variable, and read from it rather than through a pipe. A
+          # warning written into a pipe the loop reads is not an annotation Actions
+          # sees: it is a line the loop takes for a review id, and the dismiss fails
+          # on it. Reporting and data have to travel separately.
           if ! ids="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
                         --jq "[.[] | select(.state == \"CHANGES_REQUESTED\" and ((.body // \"\") | startswith(\"$MARKER\")))] | .[].id")"; then
-            echo "::warning::could not list the reviews to withdraw on $REPO#$PR"
+            echo "::warning::could not list the reviews to withdraw on $REPO#$PR; an earlier block may still stand"
             ids=""
           fi
-          printf '%s\n' "$ids" \
-          | while read -r id; do
-              [ -n "$id" ] || continue
-              gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$id/dismissals" \
-                -f message="Superseded: the latest review found nothing blocking." \
-                -f event=DISMISS >/dev/null \
-                && echo "withdrew review $id" \
-                || echo "::warning::could not withdraw review $id on $REPO#$PR"
-            done
+          while read -r id; do
+            [ -n "$id" ] || continue
+            if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$id/dismissals" \
+                 -f message="Superseded: the latest review found nothing blocking." \
+                 -f event=DISMISS >/dev/null; then
+              echo "withdrew review $id"
+            else
+              echo "::warning::could not withdraw review $id on $REPO#$PR"
+            fi
+          done <<< "$ids"
 
       - name: Answer the request
         # The verdict, on the comment that asked for it, so the person who asked reads
@@ -1142,7 +1162,12 @@ jobs:
         # needs the App identity, and a repository without one would leave a requester
         # with eyes and no answer -- the gap this closes. Everything here needs only
         # GITHUB_TOKEN and the job's issues: write.
-        if: ${{ !cancelled() && needs.guard.outputs.comment_id != ''
+        #
+        # The condition names the same three facts its siblings name: a review turn,
+        # not cancelled, and a verdict to report. A close produces no verdict, so a
+        # request to tear a session down earns no answer.
+        if: ${{ inputs.mode == 'review' && !cancelled()
+          && needs.guard.outputs.comment_id != ''
           && steps.drive.outputs.verdict_produced == 'true' }}
         continue-on-error: true
         shell: bash
@@ -1155,20 +1180,30 @@ jobs:
           CHECK: ${{ steps.drive.outputs.check_path }}
         run: |
           set -euo pipefail
-          [ -s "${CHECK:-}" ] || exit 0
-          conclusion="$(jq -r '.conclusion // empty' "$CHECK" 2>/dev/null || true)"
+          if [ ! -s "$CHECK" ]; then
+            echo "no conclusion to answer with"
+            exit 0
+          fi
+          # jq's error goes to the log and the value comes back on stdout, so a check
+          # file this step cannot read states itself rather than arriving as data.
+          conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
 
-          # On the conclusion, not on the position the other step records: a repository
+          # On the conclusion, not on the position the step above records: a repository
           # that has not opted into approve-on-success records none for a clean review,
           # and that reader still asked a question.
           #
-          # neutral earns nothing. It is what a review concludes when it cannot show it
-          # read the diff, and a thumb up there says the change is fine when nobody
-          # looked at it.
+          # neutral earns nothing, and neither does a conclusion this step cannot read.
+          # neutral is what a review concludes when it cannot show it read the diff, and
+          # a thumb up there says the change is fine when nobody looked at it.
+          #
+          # The reaction and the one it replaces are chosen in one statement, so the
+          # two cannot drift apart.
           case "$conclusion" in
-            failure) reaction="-1" ;;
-            success) reaction="+1" ;;
-            *)       exit 0 ;;
+            failure) reaction="-1"; opposite="+1" ;;
+            success) reaction="+1"; opposite="-1" ;;
+            *)
+              echo "a ${conclusion:-missing} conclusion earns no reaction; the verdict comment carries what it found"
+              exit 0 ;;
           esac
 
           # Withdraw this bot's own opposite reaction first. A reaction is not a toggle
@@ -1176,27 +1211,40 @@ jobs:
           # leave the comment wearing both. Scoped to the reacting identity: a human who
           # thumbed the request down is voicing an opinion, and it is not this job's to
           # delete.
-          [ "$reaction" = "+1" ] && opposite="-1" || opposite="+1"
+          #
+          # GITHUB_TOKEN reacts as github-actions[bot], and an installation token cannot
+          # ask the API which login it carries, so the login is named here.
           me="github-actions[bot]"
-          # Listed into a variable rather than piped, so nothing this block reports can
-          # be read back as an id. Reporting and data travel separately.
-          mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
-                    --jq ".[] | select(.content == \"$opposite\" and .user.login == \"$me\") | .id" \
-                    2>/dev/null || true)"
-          printf '%s\n' "$mine" \
-          | while read -r rid; do
-              [ -n "$rid" ] || continue
-              gh api -X DELETE \
-                "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
-                >/dev/null 2>&1 || true
-            done
+          # Listed into a variable, and read from it rather than through a pipe, so
+          # nothing this block reports can be read back as a reaction id. Paginated,
+          # because a busy comment carries more reactions than one page holds and a
+          # miss leaves the comment wearing both thumbs.
+          if ! mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+                         --paginate \
+                         --jq ".[] | select(.content == \"$opposite\" and .user.login == \"$me\") | .id")"; then
+            echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; a $opposite from this bot may stay beside the $reaction"
+            mine=""
+          fi
+          while read -r rid; do
+            [ -n "$rid" ] || continue
+            if gh api -X DELETE \
+                 "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
+                 >/dev/null; then
+              echo "withdrew this bot's $opposite from comment $TRIGGER_ID"
+            else
+              echo "::warning::could not withdraw this bot's $opposite from comment $TRIGGER_ID in $TRIGGER_REPO; it stays beside the $reaction"
+            fi
+          done <<< "$mine"
 
           # Never fatal: a reaction is a courtesy, and losing one must not fail a review
-          # that ran and published.
-          gh api -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
-            -f content="$reaction" >/dev/null 2>&1 \
-            && echo "reacted $reaction on comment $TRIGGER_ID in $TRIGGER_REPO" \
-            || echo "::warning::could not react on comment $TRIGGER_ID in $TRIGGER_REPO; the review stands"
+          # that ran and published. Idempotent per identity and content, so a re-run on
+          # the same comment returns the reaction already there rather than a second one.
+          if gh api -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+               -f content="$reaction" >/dev/null; then
+            echo "reacted $reaction on comment $TRIGGER_ID in $TRIGGER_REPO"
+          else
+            echo "::warning::could not react on comment $TRIGGER_ID in $TRIGGER_REPO; the review stands"
+          fi
 
       - name: Post the verdict
         # Post only when a real verdict was produced, and even when the drive
