@@ -943,7 +943,7 @@ jobs:
           while IFS=$'\t' read -r path line side severity detail_b64; do
             [ -z "$path" ] && continue
             detail="$(printf '%s' "$detail_b64" | base64 --decode)"
-            body="$MARKER"$'\n'"**review · ${severity}** — ${detail}"
+            body="$MARKER"$'\n'"**${severity}** — ${detail}"
             if gh api -X POST "repos/$REPO/pulls/$PR/comments" \
                  -f body="$body" -f commit_id="$head_sha" -f path="$path" \
                  -F line="$line" -f side="$side" >/dev/null 2>&1; then
@@ -1060,6 +1060,8 @@ jobs:
           # request carries a CHANGES_REQUESTED review whose body starts with the old
           # value.
           MARKER: "<!-- seidroid-review -->"
+          # Empty on an automatic review, which has no comment to react to.
+          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
         run: |
           set -euo pipefail
           if [ ! -s "$CHECK" ]; then
@@ -1100,6 +1102,32 @@ jobs:
             echo "recorded $event on $REPO#$PR"
           else
             echo "no position to record for a $conclusion conclusion"
+          fi
+
+          # Answer the request on the request itself, so the person who asked reads the
+          # outcome where they asked rather than by opening the run. The eyes this job
+          # opens with say it started; this says how it ended, and the pair separates a
+          # review still running from one that decided.
+          #
+          # Keyed on the POSITION, not on the job succeeding: a run that finished without
+          # reading the diff is not an approval and must not wear one. A conclusion that
+          # records no position gets no reaction, which is the honest answer -- the
+          # verdict comment carries what it found.
+          #
+          # Comment path only, and never fatal: a reaction is a courtesy, and losing one
+          # must not fail a review that ran.
+          if [ -n "${TRIGGER_ID:-}" ]; then
+            case "$event" in
+              APPROVE)         reaction="+1" ;;
+              REQUEST_CHANGES) reaction="-1" ;;
+              *)               reaction="" ;;
+            esac
+            if [ -n "$reaction" ]; then
+              gh api -X POST "repos/$REPO/issues/comments/$TRIGGER_ID/reactions" \
+                -f content="$reaction" >/dev/null 2>&1 \
+                && echo "reacted $reaction on comment $TRIGGER_ID" \
+                || echo "::warning::could not react on comment $TRIGGER_ID; the review stands"
+            fi
           fi
 
           # An earlier block this run no longer stands behind. Left standing it
