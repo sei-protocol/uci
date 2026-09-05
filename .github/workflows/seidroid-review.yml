@@ -1103,10 +1103,16 @@ jobs:
           fi
 
           if [ -n "$event" ]; then
-            gh api -X POST "repos/$REPO/pulls/$PR/reviews" \
-              -f event="$event" -f commit_id="$head_sha" \
-              -f body="$MARKER"$'\n'"$note" >/dev/null
-            echo "recorded $event on $REPO#$PR"
+            # Guarded, because set -e would abort the step here and take the reaction
+            # and the withdrawal below with it. A 422 on self-approval, a stale
+            # commit_id or a transient 5xx must not also cost the reader the answer.
+            if gh api -X POST "repos/$REPO/pulls/$PR/reviews" \
+                 -f event="$event" -f commit_id="$head_sha" \
+                 -f body="$MARKER"$'\n'"$note" >/dev/null 2>&1; then
+              echo "recorded $event on $REPO#$PR"
+            else
+              echo "::warning::could not record $event on $REPO#$PR; the verdict comment stands"
+            fi
           else
             echo "no position to record for a $conclusion conclusion"
           fi
@@ -1116,20 +1122,35 @@ jobs:
           # opens with say it started; this says how it ended, and the pair separates a
           # review still running from one that decided.
           #
-          # Keyed on the POSITION, not on the job succeeding: a run that finished without
-          # reading the diff is not an approval and must not wear one. A conclusion that
-          # records no position gets no reaction, which is the honest answer -- the
-          # verdict comment carries what it found.
-          #
           # Comment path only, and never fatal: a reaction is a courtesy, and losing one
           # must not fail a review that ran.
           if [ -n "${TRIGGER_ID:-}" ]; then
-            case "$event" in
-              APPROVE)         reaction="+1" ;;
-              REQUEST_CHANGES) reaction="-1" ;;
-              *)               reaction="" ;;
+            # On the CONCLUSION, not on the position. A repository that has not opted
+            # into approve-on-success records no position for a clean review, and that
+            # reader still asked a question and is owed the answer.
+            #
+            # neutral earns nothing. It is what a review concludes when it cannot show
+            # it read the diff, and a thumb up on that says the change is fine when
+            # nobody looked at it.
+            case "$conclusion" in
+              failure) reaction="-1" ;;
+              success) reaction="+1" ;;
+              *)       reaction="" ;;
             esac
             if [ -n "$reaction" ]; then
+              # Withdraw the other one first. A reaction is not a toggle, and a re-run
+              # replays the same comment id -- so a verdict that flipped would leave the
+              # comment wearing both, in an order no reader can see.
+              [ "$reaction" = "+1" ] && opposite="-1" || opposite="+1"
+              GH_TOKEN="$TRIGGER_TOKEN" gh api \
+                "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+                --jq ".[] | select(.content == \"$opposite\") | .id" 2>/dev/null \
+              | while read -r rid; do
+                  [ -n "$rid" ] || continue
+                  GH_TOKEN="$TRIGGER_TOKEN" gh api -X DELETE \
+                    "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
+                    >/dev/null 2>&1 || true
+                done
               GH_TOKEN="$TRIGGER_TOKEN" gh api \
                 -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
                 -f content="$reaction" >/dev/null 2>&1 \
