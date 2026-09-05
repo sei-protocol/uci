@@ -577,6 +577,9 @@ jobs:
       pull-requests: write   # upsert the one sticky verdict comment
       contents: read         # read PR metadata
       checks: write          # publish the review check run
+      # React to the triggering comment. A reaction on a PR comment goes to the
+      # ISSUE comments endpoint, which pull-requests: write does not cover.
+      issues: write          # acknowledge the trigger with a reaction
     # The credential lives ONLY here, at job level. It must never be re-declared
     # as step-level env on a `uses:` step (composite/action steps do not receive
     # step-level env at all) -- that is the exact defect that broke every real
@@ -594,6 +597,36 @@ jobs:
       # happens here, the same way the machine-client check below does it.
       HAS_REVIEWER_IDENTITY: ${{ secrets.SEIDROID_APP_ID != '' }}
     steps:
+      # First, deliberately: the reaction is the only signal the trigger was
+      # seen, and everything after it -- toolchain, driver install, session
+      # start -- runs for minutes before anything else appears on the pull
+      # request. An acknowledgement that arrives after the verdict is not one.
+      #
+      # Comment path only. An automatic pull_request review has no comment to
+      # react to, so the guard leaves comment_id empty and this is skipped.
+      #
+      # continue-on-error: an acknowledgement is a courtesy. Failing the review
+      # because a reaction did not post would trade the whole job for the
+      # signal that the job started.
+      - name: Acknowledge the trigger
+        if: ${{ needs.guard.outputs.comment_id != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+          # Reactions are idempotent per (user, content): re-running a review on
+          # the same comment returns the existing reaction rather than adding a
+          # second one, so a retry needs no cleanup.
+          if gh api -X POST "repos/$REPO/issues/comments/$TRIGGER_ID/reactions" \
+              -f content=eyes >/dev/null 2>&1; then
+            echo "acknowledged comment $TRIGGER_ID"
+          else
+            echo "::warning::could not react to comment $TRIGGER_ID; the review continues"
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
