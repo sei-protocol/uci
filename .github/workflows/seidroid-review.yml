@@ -1060,15 +1060,6 @@ jobs:
           # request carries a CHANGES_REQUESTED review whose body starts with the old
           # value.
           MARKER: "<!-- seidroid-review -->"
-          # Empty on an automatic review, which has no comment to react to.
-          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
-          # The ASKING repository, which REPO above is not: a targeted request names
-          # the reviewed pull request elsewhere, and the comment stays where it was
-          # written. GITHUB_TOKEN rather than the identity token for the same reason --
-          # the identity is minted scoped to the reviewed repository, and this job
-          # carries issues: write on the caller's own.
-          TRIGGER_REPO: ${{ github.repository }}
-          TRIGGER_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ ! -s "$CHECK" ]; then
@@ -1117,62 +1108,83 @@ jobs:
             echo "no position to record for a $conclusion conclusion"
           fi
 
-          # Answer the request on the request itself, so the person who asked reads the
-          # outcome where they asked rather than by opening the run. The eyes this job
-          # opens with say it started; this says how it ended, and the pair separates a
-          # review still running from one that decided.
-          #
-          # Comment path only, and never fatal: a reaction is a courtesy, and losing one
-          # must not fail a review that ran.
-          if [ -n "${TRIGGER_ID:-}" ]; then
-            # On the CONCLUSION, not on the position. A repository that has not opted
-            # into approve-on-success records no position for a clean review, and that
-            # reader still asked a question and is owed the answer.
-            #
-            # neutral earns nothing. It is what a review concludes when it cannot show
-            # it read the diff, and a thumb up on that says the change is fine when
-            # nobody looked at it.
-            case "$conclusion" in
-              failure) reaction="-1" ;;
-              success) reaction="+1" ;;
-              *)       reaction="" ;;
-            esac
-            if [ -n "$reaction" ]; then
-              # Withdraw the other one first. A reaction is not a toggle, and a re-run
-              # replays the same comment id -- so a verdict that flipped would leave the
-              # comment wearing both, in an order no reader can see.
-              [ "$reaction" = "+1" ] && opposite="-1" || opposite="+1"
-              GH_TOKEN="$TRIGGER_TOKEN" gh api \
-                "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
-                --jq ".[] | select(.content == \"$opposite\") | .id" 2>/dev/null \
-              | while read -r rid; do
-                  [ -n "$rid" ] || continue
-                  GH_TOKEN="$TRIGGER_TOKEN" gh api -X DELETE \
-                    "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
-                    >/dev/null 2>&1 || true
-                done || true
-              GH_TOKEN="$TRIGGER_TOKEN" gh api \
-                -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
-                -f content="$reaction" >/dev/null 2>&1 \
-                && echo "reacted $reaction on comment $TRIGGER_ID in $TRIGGER_REPO" \
-                || echo "::warning::could not react on comment $TRIGGER_ID in $TRIGGER_REPO; the review stands"
-            fi
-          fi
-
           # An earlier block this run no longer stands behind. Left standing it
           # keeps a pull request red for a finding that is gone, and only a human
           # can clear it.
           if [ "$conclusion" = "failure" ]; then
             exit 0
           fi
-          gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+          { gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
             --jq "[.[] | select(.state == \"CHANGES_REQUESTED\" and ((.body // \"\") | startswith(\"$MARKER\")))] | .[].id" \
+            || echo "::warning::could not list the reviews to withdraw on $REPO#$PR"; } \
           | while read -r id; do
               [ -n "$id" ] || continue
               gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$id/dismissals" \
                 -f message="Superseded: the latest review found nothing blocking." \
                 -f event=DISMISS >/dev/null && echo "withdrew review $id"
-            done || echo "::warning::could not list the reviews to withdraw on $REPO#$PR"
+            done
+
+      - name: Answer the request
+        # The verdict, on the comment that asked for it, so the person who asked reads
+        # the outcome where they asked. The eyes at the top of this job say it started;
+        # this says how it ended.
+        #
+        # Its own step, and not part of the one that records the position: that step
+        # needs the App identity, and a repository without one would leave a requester
+        # with eyes and no answer -- the gap this closes. Everything here needs only
+        # GITHUB_TOKEN and the job's issues: write.
+        if: ${{ !cancelled() && needs.guard.outputs.comment_id != ''
+          && steps.drive.outputs.verdict_produced == 'true' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          # The ASKING repository. A targeted request names the reviewed pull request
+          # elsewhere; the comment stays where it was written.
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_REPO: ${{ github.repository }}
+          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          CHECK: ${{ steps.drive.outputs.check_path }}
+        run: |
+          set -euo pipefail
+          [ -s "${CHECK:-}" ] || exit 0
+          conclusion="$(jq -r '.conclusion // empty' "$CHECK" 2>/dev/null || true)"
+
+          # On the conclusion, not on the position the other step records: a repository
+          # that has not opted into approve-on-success records none for a clean review,
+          # and that reader still asked a question.
+          #
+          # neutral earns nothing. It is what a review concludes when it cannot show it
+          # read the diff, and a thumb up there says the change is fine when nobody
+          # looked at it.
+          case "$conclusion" in
+            failure) reaction="-1" ;;
+            success) reaction="+1" ;;
+            *)       exit 0 ;;
+          esac
+
+          # Withdraw this bot's own opposite reaction first. A reaction is not a toggle
+          # and a re-run replays the same comment id, so a verdict that flipped would
+          # leave the comment wearing both. Scoped to the reacting identity: a human who
+          # thumbed the request down is voicing an opinion, and it is not this job's to
+          # delete.
+          [ "$reaction" = "+1" ] && opposite="-1" || opposite="+1"
+          me="github-actions[bot]"
+          { gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+              --jq ".[] | select(.content == \"$opposite\" and .user.login == \"$me\") | .id" \
+              2>/dev/null || true; } \
+          | while read -r rid; do
+              [ -n "$rid" ] || continue
+              gh api -X DELETE \
+                "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
+                >/dev/null 2>&1 || true
+            done
+
+          # Never fatal: a reaction is a courtesy, and losing one must not fail a review
+          # that ran and published.
+          gh api -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+            -f content="$reaction" >/dev/null 2>&1 \
+            && echo "reacted $reaction on comment $TRIGGER_ID in $TRIGGER_REPO" \
+            || echo "::warning::could not react on comment $TRIGGER_ID in $TRIGGER_REPO; the review stands"
 
       - name: Post the verdict
         # Post only when a real verdict was produced, and even when the drive
