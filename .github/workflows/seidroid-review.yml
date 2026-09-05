@@ -1204,10 +1204,16 @@ jobs:
           # A driver older than these fields writes none of them and jq answers null. The
           # sentinel makes that a value is_count rejects, so an old driver publishes the
           # same comment with a shorter line that is still true.
+          # Under `counts`, which is where the driver writes them: check.json carries
+          # `counts: {blocking, non_blocking, placeable, pre_existing}` beside a
+          # top-level `conclusion`. Read at the ROOT they answered null on every run, so
+          # the line never printed a number, the notice below claimed the driver predates
+          # fields it has, and neither disagreement warning could fire -- the one automated
+          # cross-check between this comment and the check run was dead code.
           blocking="" non_blocking="" pre_existing="" conclusion=""
           if [ -s "${CHECK:-}" ]; then
-            read -r blocking non_blocking pre_existing conclusion < <(jq -r '[(.blocking // "?"),
-              (.non_blocking // "?"), (.pre_existing // "?"), (.conclusion // "?")] | @tsv' \
+            read -r blocking non_blocking pre_existing conclusion < <(jq -r '[(.counts.blocking // "?"),
+              (.counts.non_blocking // "?"), (.counts.pre_existing // "?"), (.conclusion // "?")] | @tsv' \
               "$CHECK" 2>/dev/null) || true
           fi
           if is_count "$blocking" && is_count "$non_blocking"; then
