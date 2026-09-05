@@ -1150,7 +1150,7 @@ jobs:
                   GH_TOKEN="$TRIGGER_TOKEN" gh api -X DELETE \
                     "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
                     >/dev/null 2>&1 || true
-                done
+                done || true
               GH_TOKEN="$TRIGGER_TOKEN" gh api \
                 -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
                 -f content="$reaction" >/dev/null 2>&1 \
@@ -1172,7 +1172,7 @@ jobs:
               gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$id/dismissals" \
                 -f message="Superseded: the latest review found nothing blocking." \
                 -f event=DISMISS >/dev/null && echo "withdrew review $id"
-            done
+            done || echo "::warning::could not list the reviews to withdraw on $REPO#$PR"
 
       - name: Post the verdict
         # Post only when a real verdict was produced, and even when the drive
