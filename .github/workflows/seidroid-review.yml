@@ -1062,6 +1062,13 @@ jobs:
           MARKER: "<!-- seidroid-review -->"
           # Empty on an automatic review, which has no comment to react to.
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          # The ASKING repository, which REPO above is not: a targeted request names
+          # the reviewed pull request elsewhere, and the comment stays where it was
+          # written. GITHUB_TOKEN rather than the identity token for the same reason --
+          # the identity is minted scoped to the reviewed repository, and this job
+          # carries issues: write on the caller's own.
+          TRIGGER_REPO: ${{ github.repository }}
+          TRIGGER_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ ! -s "$CHECK" ]; then
@@ -1123,10 +1130,11 @@ jobs:
               *)               reaction="" ;;
             esac
             if [ -n "$reaction" ]; then
-              gh api -X POST "repos/$REPO/issues/comments/$TRIGGER_ID/reactions" \
+              GH_TOKEN="$TRIGGER_TOKEN" gh api \
+                -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
                 -f content="$reaction" >/dev/null 2>&1 \
-                && echo "reacted $reaction on comment $TRIGGER_ID" \
-                || echo "::warning::could not react on comment $TRIGGER_ID; the review stands"
+                && echo "reacted $reaction on comment $TRIGGER_ID in $TRIGGER_REPO" \
+                || echo "::warning::could not react on comment $TRIGGER_ID in $TRIGGER_REPO; the review stands"
             fi
           fi
 
