@@ -7,7 +7,7 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # binary. A thin caller in the reviewed repo wires the triggers and calls this with
 # `uses:`. Flow: comment `@seidroid review` on a pull request
 # -> guard gate -> install and run the driver over one managed omnigent session ->
-# post one sticky verdict, the findings it can place, and a check run.
+# post the verdict as a new comment, the findings it can place, and a check run.
 #
 # TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
 # wires that trigger and passes `mode: review`. A MANUAL one runs when a person
@@ -574,7 +574,7 @@ jobs:
     # timeout, with its reason, before the runner kills the job.
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
-      pull-requests: write   # upsert the one sticky verdict comment
+      pull-requests: write   # post the verdict comment and the review position
       contents: read         # read PR metadata
       checks: write          # publish the review check run
       # React to the triggering comment. A reaction on a PR comment goes to the
@@ -1117,7 +1117,7 @@ jobs:
                 -f event=DISMISS >/dev/null && echo "withdrew review $id"
             done
 
-      - name: Post verdict (sticky upsert)
+      - name: Post the verdict
         # Post only when a real verdict was produced, and even when the drive
         # step above exited non-zero -- `!cancelled()` runs on any outcome
         # except the job itself being cancelled (e.g. superseded by a newer
@@ -1292,21 +1292,26 @@ jobs:
               cat "$NOTE"
             fi
           fi
-          # One bot comment per PR: find by marker -> PATCH, else POST. repo/pr from env,
-          # not template-interpolated into the script.
+          # A NEW comment every iteration, never an edit of the last one. Editing leaves
+          # the comment at its ORIGINAL position in the thread and notifies nobody, so a
+          # re-review became close to invisible: it did not move, it did not notify, and
+          # it destroyed the previous verdict's text. A verdict written four minutes ago
+          # rendered eighteen hours up the page, indistinguishable from a review that
+          # never ran, and that cost real diagnosis time.
           #
-          # Each call's failure is caught rather than left to `set -e`, so this step can
-          # say what was lost before it ends. A failed lookup does not fall through to
-          # POST: that leaves a second sticky comment behind, and one comment per pull
-          # request is this tool's whole contract with the reader.
+          # Earlier verdicts are left standing on purpose. They are the record of what the
+          # review said before the author's fixes, which is the thing a reader compares
+          # against. A long pull request accumulates a few, which is the accepted cost.
+          #
+          # It also removes a hazard the marker lookup carried: this marker is shared with
+          # the unplaced-findings note posted above, so selecting `.[0]` by marker could
+          # overwrite that note rather than the previous verdict.
+          #
+          # repo/pr from env, not template-interpolated into the script. The failure is
+          # caught rather than left to `set -e`, so this step can say what was lost.
           posted=false
-          if id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                   --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"; then
-            if [ -n "$id" ]; then
-              if gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null; then posted=true; fi
-            else
-              if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then posted=true; fi
-            fi
+          if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
+            posted=true
           fi
           if [ "$posted" = true ]; then
             echo "posted the verdict on $REPO#$PR"
