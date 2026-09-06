@@ -1181,12 +1181,19 @@ jobs:
         # at its own site and stated there, so an unreadable check file, a position
         # the API refuses and a courtesy log line all stay quiet. What reaches the job
         # is the withdrawal.
+        #
+        # The App records the position where the caller configured one, and the
+        # workflow's own identity records it otherwise, so a repository with no App
+        # still takes a position and can still clear a block it left before. That
+        # identity reads as github-actions[bot], which costs two things a caller has
+        # to know: a merge gate that names its reviewers may not count it, and a
+        # repository whose Actions policy forbids an approval refuses the event
+        # outright. The COMMENT rung below answers the second.
         if: ${{ inputs.mode == 'review' && !cancelled()
-          && steps.drive.outputs.verdict_produced == 'true'
-          && steps.identity.outputs.token != '' }}
+          && steps.drive.outputs.verdict_produced == 'true' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ steps.identity.outputs.token }}
+          GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
@@ -1243,21 +1250,37 @@ jobs:
             note="review found nothing blocking."
           fi
 
-          if [ -n "$event" ]; then
-            # commit_id is omitted rather than sent empty when the commit is unknown:
-            # the API rejects an empty one, and its own default is the pull request's
-            # latest commit, which is the fallback announced above.
+          # commit_id is omitted rather than sent empty when the commit is unknown:
+          # the API rejects an empty one, and its own default is the pull request's
+          # latest commit, which is the fallback announced above.
+          post_position() {
+            local args
             args=(-X POST "repos/$REPO/pulls/$PR/reviews"
-                  -f event="$event" -f body="$MARKER"$'\n'"$note")
+                  -f event="$1" -f body="$MARKER"$'\n'"$note")
             if [ -n "$head_sha" ]; then
               args+=(-f commit_id="$head_sha")
             fi
+            gh api "${args[@]}" >/dev/null
+          }
+
+          if [ -n "$event" ]; then
             # Guarded, because set -e would abort the step here and take the
             # withdrawal below with it. A 422 on self-approval, a stale commit_id or
             # a transient 5xx must not also cost the pull request its retraction. The
             # API's own error stays on stderr, where it says why.
-            if gh api "${args[@]}" >/dev/null; then
+            #
+            # COMMENT is the rung under both events, and the same one ai-review takes.
+            # The API refuses an opinion the identity may not hold -- github-actions
+            # approving where the repository's Actions policy forbids it, or either
+            # identity taking a side on a pull request it opened itself -- and refuses
+            # nothing about a review that states its finding without voting. So the
+            # reviewers list still carries this run, and the check run still carries
+            # the gate. What the rung costs is the vote: an APPROVE that lands here
+            # clears no approval requirement, and a REQUEST_CHANGES blocks nothing.
+            if post_position "$event"; then
               echo "recorded $event on $REPO#$PR"
+            elif post_position COMMENT; then
+              echo "::warning::$REPO#$PR would not take $event, so this review is recorded as a comment; the check run carries the $conclusion conclusion"
             else
               echo "::warning::could not record $event on $REPO#$PR; the verdict comment stands"
             fi
@@ -1356,9 +1379,9 @@ jobs:
         # this step withdraws them and says how it ended.
         #
         # Its own step, and not part of the one that records the position: that step
-        # needs the App identity, and a repository without one would leave a requester
-        # with eyes and no answer -- the gap this closes. Everything here needs only
-        # GITHUB_TOKEN and the job's issues: write.
+        # is skipped for a run that reached no verdict, and the person who asked is
+        # owed an answer even then. Everything here needs only GITHUB_TOKEN and the
+        # job's issues: write.
         #
         # The condition names three facts: a review turn, not cancelled, and a comment
         # to answer. A close produces no verdict, so a request to tear a session down
