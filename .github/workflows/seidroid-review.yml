@@ -206,6 +206,12 @@ on:
           in-cluster ClusterIP Service, which is plain http on port 80: a
           credentialed client refuses to be built against it, and the token mint
           refuses to send the client secret over it.
+
+          This default is a development deployment. Platform changes land there
+          first, so a change on it can make a review succeed and post nothing.
+          Brandon Chatham accepts that exposure: no production deployment carries
+          the seidroid bundle and a provisioned machine client today. Pass a
+          production URL from a merge-path caller as soon as one exists.
         required: false
         type: string
         default: 'https://seigent.dev.platform.sei.io'
@@ -238,20 +244,36 @@ on:
       scouts:
         description: >-
           Independent readings to gather before the review, as `name=agent`,
-          comma-separated. Empty runs the review alone, which is what it did
-          before scouts existed. Each scout reads the same pull request in its own
+          comma-separated. Each scout reads the same pull request in its own
           session on its own agent bundle, seeing neither the review nor another
           scout; the review then verifies their claims against the diff and merges
           what holds. A scout naming the review's own agent is refused, as are two
-          scouts sharing one — neither would be a second opinion. Passed to the driver as
-          SEIDROID_SCOUTS.
+          scouts sharing one — neither would be a second opinion. Empty runs the
+          review alone. Passed to the driver as SEIDROID_SCOUTS.
 
-          Set this on the CLOSE job too. Scouts hold sessions of their own, and
-          close derives which to delete from this value: unset there, every scout
-          sandbox is left running with nothing able to reclaim it.
+          Two models read every pull request by default. `xreview-scout-codex` is
+          the one scout bundle sei-internal-skills carries today, and PLT-1168
+          tracks a Cursor bundle. A scout that fails costs the review that reading
+          and nothing else. The driver turns each failure into a note, hands it to
+          the review, and the review reports with fewer readers. That note is the
+          only signal, so a bundle absent from a deployment fails quietly on every
+          pull request.
+
+          Pass the SAME value on the CLOSE job. Scouts hold sessions of their own,
+          and close derives which to delete from this value, keyed on the scout
+          NAME. A caller that omits it on both jobs is safe, because close reads
+          this same default. A caller that sets it on the review job and omits it
+          on the close job is not. Close then deletes the default name, and the
+          configured scout keeps its sandbox running.
+
+          Set `scouts: ''` to review on one model. Do that on a deployment that
+          does not carry the bundle above, and on a caller that wires no
+          `mode: close` job. A scout holds a sandbox of its own, and close is the
+          only thing that reclaims one. A caller with no close job leaks one
+          sandbox per pull request.
         required: false
         type: string
-        default: ''
+        default: 'codex=xreview-scout-codex'
       claude-model:
         description: >-
           Model to answer the review on, substituting for the one the agent's spec
@@ -299,6 +321,22 @@ on:
           outside one does, and a recorded run had exactly that refused and spent
           three extra tool calls recovering. The diff now stages into the working
           directory, so this grant is the belt to that braces.
+
+          Brandon Chatham accepts the unrestricted shell. The review builds and
+          tests the tree where that is straightforward. A reviewer that cannot
+          compile can only guess at a finding that needs one. ai-review scopes its
+          own model to `Read,Bash(gh pr diff:*),Bash(gh pr view:*)` and gives up
+          that capability. That acceptance covers code from inside the
+          organisation.
+
+          Fork code sits outside it, and one path still reaches it. A review runs
+          on the repository the pull request is on, and GitHub withholds this
+          workflow's secrets from an automatic fork run. An explicit
+          `@seidroid review` arrives as an issue_comment in the base repository,
+          which does carry the secrets. PLT-1156 is the control that refuses such
+          a request on a fork-originated pull request. It is not in this file yet,
+          so a member who asks for one runs this shell over fork code. Weigh that
+          before you widen or narrow this list.
         required: false
         type: string
         default: 'Bash,Read'
