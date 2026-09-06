@@ -1346,6 +1346,13 @@ jobs:
           # replies are every recent comment that is not it, matched on id rather than on
           # position, so a thread short enough to carry its own root in the recent window
           # does not report the finding back as a reply to itself.
+          #
+          # reply_total is how many replies the thread has, against however many of them
+          # this carries. The count is written whether or not the two differ, so a reader
+          # of this file needs no second source to tell a whole conversation from a
+          # shortened one. Nothing consumes it yet: the driver renders "showing N of M"
+          # from it in the change that lands beside this one, and an older driver ignores
+          # a key it does not know.
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           jq '[ .[]
                 | select((.root.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
@@ -1360,6 +1367,7 @@ jobs:
                     replies: [ $t.recent.nodes[]
                                | select(.id != $t.root.nodes[0].id)
                                | "\(.author.login // "someone"): \(.body)" ],
+                    reply_total: (($t.recent.totalCount // 1) - 1),
                     resolved: .isResolved } ]' "$THREADS.raw" > "$THREADS"
           fetched="$(jq length "$THREADS.raw")"
           carried="$(jq length "$THREADS")"
@@ -2494,8 +2502,9 @@ jobs:
         # grants pull-requests: write. So a refusal names the identity rather than the
         # thread, and the warning below reports which identity the API refused.
         #
-        # First 100 threads, as the history read takes them. A pull request past that is
-        # PLT-1162's.
+        # Every page, as the history read takes them. The two have to see the same pull
+        # request: a resolver stopping at the first page would call a thread the history
+        # carries one this tool never left.
         if: ${{ inputs.mode == 'review' && !cancelled()
           && steps.drive.outputs.verdict_produced == 'true' }}
         continue-on-error: true
@@ -2565,43 +2574,74 @@ jobs:
           # sit between the two, and a thread an author resolved in that time is one this
           # step must not report as its own doing.
           #
+          # Every page, like the history read. The two have to see the same pull request:
+          # the history carries a thread from page two, the review can name it, and a
+          # resolver that stopped at the first page would report a thread this tool did
+          # leave as one it never wrote -- a false statement in the log, and the thread
+          # left open beside the finding that restates it.
+          #
           # $owner and friends are GraphQL variables, so the query stays literal.
           # shellcheck disable=SC2016
-          if ! gh api graphql -f query='
-            query($owner: String!, $name: String!, $number: Int!) {
+          if ! gh api graphql --paginate -f query='
+            query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
               repository(owner: $owner, name: $name) {
                 pullRequest(number: $number) {
-                  reviewThreads(first: 100) {
+                  reviewThreads(first: 100, after: $endCursor) {
                     nodes {
                       id
                       isResolved
                       comments(first: 1) { nodes { body author { login } } }
                     }
+                    pageInfo { hasNextPage endCursor }
                   }
                 }
               }
-            }' -F owner="$owner" -F name="$name" -F number="$PR" > "$state" 2> "$state.err"; then
+            }' -F owner="$owner" -F name="$name" -F number="$PR" 2> "$state.err" \
+            | jq -s '[ .[].data.repository.pullRequest.reviewThreads.nodes[] ]' > "$state"; then
             echo "::warning::the review threads on $REPO#$PR could not be read as ${REVIEWER_LOGIN:-an unnamed identity}: $(apiSaid "$state.err"); no thread was closed and the author sees each restated finding twice"
             exit 0
           fi
 
-          # Two sets, because they answer two different questions and only one of them is
-          # a warning. `ours` is every thread this reviewer wrote, whatever its state, so
-          # a thread already resolved reads as done rather than as an id somebody
-          # invented. `open` is the subset there is still something to do to.
+          # Three sets, because a thread this run will not close is not one thing. Only
+          # the last of them is a warning, and saying so takes all three: a message that
+          # calls a thread this tool wrote one it never left is false, whichever reason
+          # kept the run from closing it.
+          #
+          #   open   -- this run's own identity, still unresolved. The only set it closes.
+          #   ours   -- this run's own identity, any state. Already resolved, nothing to do.
+          #   either -- this tool's, under either identity it posts as. The history read
+          #             admits these, so the review can legitimately name one; this run
+          #             does not close a thread it did not write, and says which identity
+          #             did instead of denying the thread.
+          #
+          # The mutation keeps the strict single-login test. Reading a thread another
+          # identity wrote is inert; closing one is not, and it stays as narrow as the
+          # identity performing it.
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
-          own='.data.repository.pullRequest.reviewThreads.nodes[]
-                | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
-                | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)'
-          ours="$(jq -r "$own | .id" "$state")"
-          open="$(jq -r "$own | select(.isResolved | not) | .id" "$state")"
+          marked='.[] | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))'
+          # shellcheck disable=SC2016  # same
+          mine=' | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)'
+          # shellcheck disable=SC2016  # same
+          anyOfOurs=' | select(.comments.nodes[0].author.login
+                               | . != null and . != ""
+                                 and (. == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))'
+          ours="$(jq -r "$marked$mine | .id" "$state")"
+          open="$(jq -r "$marked$mine | select(.isResolved | not) | .id" "$state")"
+          either="$(jq -r "$marked$anyOfOurs | .id" "$state")"
 
-          closed=0 refused=0 failed=0
+          closed=0 refused=0 failed=0 elsewhere=0
           while IFS= read -r id; do
             [ -z "$id" ] && continue
             if ! printf '%s\n' "$open" | grep -qxF -- "$id"; then
               if printf '%s\n' "$ours" | grep -qxF -- "$id"; then
                 echo "review thread $id is already resolved; nothing to do"
+              elif printf '%s\n' "$either" | grep -qxF -- "$id"; then
+                # This tool left it, under the identity it was posting as then. The
+                # history read admits both, so naming it is correct; closing it is not
+                # this run's to do, and calling it a thread this tool never wrote would
+                # be false.
+                echo "review thread $id on $REPO#$PR was left under this tool's other identity, not ${REVIEWER_LOGIN:-the one this run uses}; this run does not close it and it stays open"
+                elsewhere=$((elsewhere+1))
               else
                 echo "::warning::review thread '$id' is not an unresolved thread this tool left on $REPO#$PR; it was not resolved"
                 refused=$((refused+1))
@@ -2630,7 +2670,7 @@ jobs:
               failed=$((failed+1))
             fi
           done <<< "$wanted"
-          echo "threads: $closed closed, $refused refused, $failed could not be resolved"
+          echo "threads: $closed closed, $refused refused, $elsewhere left under another identity, $failed could not be resolved"
 
       - name: Report a review that reached no verdict
         # The step above answers a review that decided; this one answers a review that
