@@ -1604,6 +1604,16 @@ jobs:
         # its file; an untouched file has nowhere to go and is named in the summary.
         # So the cost of a review that sees past the hunks is paid in placement,
         # not in lost findings.
+        #
+        # Every finding the diff can hold rides in ONE review, which is what
+        # ai-review posts and what the author reads top to bottom on a single
+        # notification. Only the middle rung costs a call of its own: the reviews
+        # API carries a line comment and has no field for a file-level one.
+        #
+        # That review is COMMENTED and its body opens with no verdict marker, so the
+        # withdrawal below -- which selects a CHANGES_REQUESTED review whose body
+        # opens with VERDICT_MARKER -- does not select it, and the position this run
+        # takes stays the position step's alone.
         if: ${{ inputs.mode == 'review' && !cancelled()
           && steps.drive.outputs.verdict_produced == 'true' }}
         continue-on-error: true
@@ -1633,7 +1643,7 @@ jobs:
           # recorded. A comment on any other commit points at code the review never
           # saw, so the head is not read again here.
           #
-          # Empty when that record failed. Both calls below need a commit id and the
+          # Empty when that record failed. Every call below needs a commit id and the
           # API rejects an empty one, so no comment can reach the diff and every
           # finding takes the third rung of the ladder above: the summary. The reader
           # loses the placement, not the finding.
@@ -1642,40 +1652,186 @@ jobs:
             echo "::warning::the reviewed commit was not recorded on $REPO#$PR; every finding goes to the summary instead of the diff"
           fi
           on_line=0 on_file=0 unplaced=0
+
+          # The third rung. Each line opens with a dash and a backtick, which is
+          # what the summary counts when it cuts the list to fit GitHub's limit.
+          # shellcheck disable=SC2016  # the backticks are markdown, not a substitution
+          to_summary() {
+            printf -- '- `%s:%s` (%s) — %s\n' "$1" "$2" "$4" "$5" >> "$NOTE"
+            unplaced=$((unplaced+1))
+            return 0
+          }
+
+          # The second rung, one call per finding. A file-level comment is a field
+          # the reviews API does not carry, so this one cannot ride in the batch
+          # below. The file can still be in the pull request, and a comment on it
+          # reaches the reviewer in the file they are already reading, so the cited
+          # line rides in the body instead.
+          #
+          # Guarded on the commit, not left to the API. Without one the call returns
+          # 422, and asking for an answer known before the call spends the rate limit
+          # on it.
+          on_file_or_summary() {
+            if [ -n "$head_sha" ] && gh api -X POST "repos/$REPO/pulls/$PR/comments" \
+                 -f body="$FINDING_MARKER"$'\n'"**$4** — $5"$'\n\n'"_Cited at \`$1:$2\`, outside this diff's changed lines._" \
+                 -f commit_id="$head_sha" -f path="$1" \
+                 -f subject_type=file >/dev/null 2>&1; then
+              on_file=$((on_file+1))
+              return 0
+            fi
+            to_summary "$@"
+            return 0
+          }
+
+          # All three rungs for one finding, with the API deciding which one it
+          # takes. This is the path for a finding the batch could not carry.
+          place_one() {
+            if [ -n "$head_sha" ] && gh api -X POST "repos/$REPO/pulls/$PR/comments" \
+                 -f body="$FINDING_MARKER"$'\n'"**$4** — $5" \
+                 -f commit_id="$head_sha" -f path="$1" \
+                 -F line="$2" -f side="$3" >/dev/null 2>&1; then
+              on_line=$((on_line+1))
+              return 0
+            fi
+            on_file_or_summary "$@"
+            return 0
+          }
+
           # The detail is base64 per record, not @tsv. Finding.Detail is raw model
           # prose with no line constraint on it, and @tsv escapes a newline, a tab or
           # a backslash into a literal \n, \t or \\ -- so a multi-line detail reached
           # the pull request showing its escape sequences instead of its text. The
           # four fields that cannot contain a tab stay plain.
-          while IFS=$'\t' read -r path line side severity detail_b64; do
-            [ -z "$path" ] && continue
-            detail="$(printf '%s' "$detail_b64" | base64 --decode)"
-            body="$FINDING_MARKER"$'\n'"**${severity}** — ${detail}"
-            # Guarded on the commit, not left to the API. Without one both calls
-            # return 422, and asking twice per finding for that answer spends the
-            # rate limit on a result already known before the loop.
-            if [ -n "$head_sha" ]; then
-              if gh api -X POST "repos/$REPO/pulls/$PR/comments" \
-                   -f body="$body" -f commit_id="$head_sha" -f path="$path" \
-                   -F line="$line" -f side="$side" >/dev/null 2>&1; then
-                on_line=$((on_line+1))
-                continue
-              fi
-              # The line is outside the hunks. The file can still be in the pull
-              # request, and a comment on it reaches the reviewer in the file they
-              # are already reading, so the cited line rides in the body instead.
-              if gh api -X POST "repos/$REPO/pulls/$PR/comments" \
-                   -f body="$body"$'\n\n'"_Cited at \`$path:$line\`, outside this diff's changed lines._" \
-                   -f commit_id="$head_sha" -f path="$path" \
-                   -f subject_type=file >/dev/null 2>&1; then
-                on_file=$((on_file+1))
-                continue
+          tsv='[.file, .line, .side, .severity, (.detail | @base64)] | @tsv'
+          rows() { jq -r "$1 | $tsv" "$2"; }
+          # Redirected into, never piped into. The counters the summary reads are
+          # this shell's, and a pipe would count them in a subshell that exits.
+          place_each() {
+            local placer="$1" path line side severity detail_b64 detail
+            while IFS=$'\t' read -r path line side severity detail_b64; do
+              [ -z "$path" ] && continue
+              detail="$(printf '%s' "$detail_b64" | base64 --decode)"
+              "$placer" "$path" "$line" "$side" "$severity" "$detail"
+            done
+            return 0
+          }
+
+          # One shape for every path below: a string file, an integer line, a side
+          # the API names. A line the model wrote as prose reads as 0, which no diff
+          # covers, so it takes the file rung rather than reaching gh as a field.
+          #
+          # Every field but the last is non-empty here, and that is what the reader
+          # below rests on. @tsv writes an empty field as nothing between two tabs,
+          # bash reads a tab as IFS whitespace and folds the pair into one delimiter,
+          # and the record then reads one field short: the severity arrives in the
+          # side, the base64 detail arrives in the severity, and a finding reaches the
+          # pull request with its own encoding printed as its severity.
+          normalise='[ .[] | { file: (.file | tostring),
+                               line: (.line | if type == "number" then floor
+                                              elif type == "string" then ((. | tonumber?) // 0 | floor)
+                                              else 0 end),
+                               side: ((.side // "RIGHT") | tostring | ascii_upcase
+                                      | if . == "LEFT" then "LEFT" else "RIGHT" end),
+                               severity: (.severity | tostring
+                                          | if . == "" then "note" else . end),
+                               detail: (.detail | tostring) }
+                      | select(.file != "") ]'
+          normal="$RUNNER_TEMP/review-findings-normalised.json"
+          if ! jq "$normalise" "$FINDINGS" > "$normal"; then
+            echo "::warning::the findings file for $REPO#$PR could not be read, so this review places nothing on the diff"
+            { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Which lines a comment can name, walked out of the pull request's own diff
+          # before anything is posted. RIGHT takes an added or a context line, LEFT
+          # takes a removed or a context one, and ai-review walks the same patches the
+          # same way. The walk covers only the files the findings name, so its size is
+          # the finding count and not the diff's.
+          #
+          # Read ahead of the call because the call is all-or-nothing: one line the API
+          # refuses loses every comment with it, so a refusal has to be predicted here
+          # rather than met there.
+          # shellcheck disable=SC2016  # $findings and friends are jq's, and single quotes are what keep them jq's
+          partition='def hunks:
+              reduce ((.patch // "") | split("\n"))[] as $l
+                ({o: 0, n: 0, R: {}, L: {}};
+                 if ($l | test("^@@ -[0-9]+(,[0-9]+)? [+][0-9]+(,[0-9]+)? @@")) then
+                   ($l | capture("^@@ -(?<o>[0-9]+)(,[0-9]+)? [+](?<n>[0-9]+)(,[0-9]+)? @@")) as $m
+                   | .o = ($m.o | tonumber) | .n = ($m.n | tonumber)
+                 elif ($l | startswith("+")) then .R[.n | tostring] = true | .n += 1
+                 elif ($l | startswith("-")) then .L[.o | tostring] = true | .o += 1
+                 elif ($l | startswith(" ")) then
+                   .R[.n | tostring] = true | .L[.o | tostring] = true | .n += 1 | .o += 1
+                 else . end)
+              | {RIGHT: .R, LEFT: .L};
+            (reduce $findings[0][] as $f ({}; .[$f.file] = true)) as $wanted
+            | ([ .[] | select($wanted[.filename // ""] // false)
+                     | {key: .filename, value: hunks} ] | from_entries) as $index
+            | ($findings[0] | map(. + {ok: (($index[.file][.side][.line | tostring]) // false)}))
+            | { anchored: [ .[] | select(.ok) | del(.ok) ],
+                loose: [ .[] | select(.ok | not) | del(.ok) ] }'
+          files="$RUNNER_TEMP/review-pr-files.json"
+          placement="$RUNNER_TEMP/review-placement.json"
+          # No --jq on the fetch. --paginate runs that filter once per page and
+          # would answer once per page; the slurp below reads what gh returns
+          # whichever shape it takes, one array or one array per page.
+          batched=false
+          if [ -n "$head_sha" ] \
+             && gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" > "$files.raw" \
+             && jq -s 'add // []' "$files.raw" > "$files" \
+             && jq --slurpfile findings "$normal" "$partition" "$files" > "$placement"; then
+            batched=true
+          elif [ -n "$head_sha" ]; then
+            echo "::warning::the changed files of $REPO#$PR could not be read, so each finding is posted on its own; the review still reaches the code"
+          fi
+
+          if [ "$batched" = true ]; then
+            anchored="$(jq '.anchored | length' "$placement")"
+            if [ "$anchored" -gt 0 ]; then
+              # The marker opens every comment body, as the first bytes. The history
+              # read and the resolve step both recognise this tool's own findings by
+              # that, and a body that merely contains it matches neither.
+              request="$RUNNER_TEMP/review-placement-request.json"
+              response="$RUNNER_TEMP/review-placement-response.json"
+              review_body="Findings on the changed lines. The verdict and the summary are in this tool's comment on this pull request."
+              # shellcheck disable=SC2016  # $sha and friends are jq's, bound by --arg
+              jq --arg sha "$head_sha" --arg marker "$FINDING_MARKER" --arg body "$review_body" \
+                 '{commit_id: $sha, event: "COMMENT", body: $body,
+                   comments: [ .anchored[]
+                               | {path: .file, line: .line, side: .side,
+                                  body: "\($marker)\n**\(.severity)** — \(.detail)"} ]}' \
+                 "$placement" > "$request"
+              # Two failures, two answers. A 422 is the API refusing the content and
+              # it creates nothing, so each finding is posted on its own and the one
+              # line that was refused costs only itself. Any other failure may be a
+              # write that landed and then lost its connection, and repeating it
+              # posts the review twice -- so those findings take the summary, where
+              # the reader still gets every one of them.
+              #
+              # The code comes from GitHub's error object on stdout, which is where
+              # gh leaves it, and this is the endpoint the position step below reads
+              # a 422 from the same way. An absent code reads as "not 422" and takes
+              # the summary: a shape this cannot read costs the placement, never a
+              # duplicate.
+              if gh api -X POST "repos/$REPO/pulls/$PR/reviews" --input "$request" > "$response"; then
+                on_line=$((on_line + anchored))
+                echo "posted one review carrying $anchored comment(s) on $REPO#$PR"
+              else
+                status="$(jq -r '.status // empty' "$response" 2>/dev/null || true)"
+                if [ "$status" = "422" ]; then
+                  echo "::warning::$REPO#$PR refused the review carrying $anchored comment(s); each finding is posted on its own instead"
+                  place_each place_one < <(rows '.anchored[]' "$placement")
+                else
+                  echo "::warning::the review carrying $anchored comment(s) could not be posted on $REPO#$PR; those findings are in the summary instead of on the diff"
+                  place_each to_summary < <(rows '.anchored[]' "$placement")
+                fi
               fi
             fi
-            # shellcheck disable=SC2016  # the backticks are markdown, not a substitution
-            printf -- '- `%s:%s` (%s) — %s\n' "$path" "$line" "$severity" "$detail" >> "$NOTE"
-            unplaced=$((unplaced+1))
-          done < <(jq -r '.[] | [.file, .line, .side, .severity, (.detail | @base64)] | @tsv' "$FINDINGS")
+            place_each on_file_or_summary < <(rows '.loose[]' "$placement")
+          else
+            place_each place_one < <(rows '.[]' "$normal")
+          fi
           # Two headers, because the summary collects findings for two reasons and
           # only one of them is about the reader's code. With no commit to attach to,
           # a finding on a changed line lands here as well, and calling it an
@@ -1692,10 +1848,10 @@ jobs:
             } > "$NOTE.tmp"
             mv "$NOTE.tmp" "$NOTE"
           fi
-          # Here and at the early exit above, and nowhere between: the two points where
-          # these are final. A run that dies in between leaves them unwritten, which is
-          # the right answer there -- placement neither finished nor was skipped, so no
-          # number it could publish would be true.
+          # Here and at the two early exits above, and nowhere between: the points
+          # where these are final. A run that dies in between leaves them unwritten,
+          # which is the right answer there -- placement neither finished nor was
+          # skipped, so no number it could publish would be true.
           #
           # One append for all three, so the summary never reads a half-written set. It
           # requires all three for that reason, including the one no term renders.
