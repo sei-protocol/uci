@@ -602,6 +602,9 @@ jobs:
           # Reactions are idempotent per (user, content): re-running a review on
           # the same comment returns the existing reaction rather than adding a
           # second one, so a retry needs no cleanup.
+          #
+          # `Answer the request` withdraws this reaction, on every path it takes. A
+          # review that keeps it reads as a review that is still running.
           if gh api -X POST "repos/$REPO/issues/comments/$TRIGGER_ID/reactions" \
               -f content=eyes >/dev/null 2>&1; then
             echo "acknowledged comment $TRIGGER_ID"
@@ -1203,18 +1206,19 @@ jobs:
       - name: Answer the request
         # The verdict, on the comment that asked for it, so the person who asked reads
         # the outcome where they asked. The eyes at the top of this job say it started;
-        # this says how it ended.
+        # this step withdraws them and says how it ended.
         #
         # Its own step, and not part of the one that records the position: that step
         # needs the App identity, and a repository without one would leave a requester
         # with eyes and no answer -- the gap this closes. Everything here needs only
         # GITHUB_TOKEN and the job's issues: write.
         #
-        # The condition names the same three facts its siblings name: a review turn,
-        # not cancelled, and a verdict to report. A close produces no verdict, so a
-        # request to tear a session down earns no answer.
-        # No verdict_produced gate: a re-run replays the trigger comment id, so a run
-        # reaching no verdict still has to clear a thumb an earlier attempt left there.
+        # The condition names three facts: a review turn, not cancelled, and a comment
+        # to answer. A close produces no verdict, so a request to tear a session down
+        # earns no answer.
+        # No verdict_produced gate: the acknowledgement waits on this step, and a re-run
+        # replays the trigger comment id, so a run reaching no verdict still has to clear
+        # the eyes, and a thumb an earlier attempt left there.
         if: ${{ inputs.mode == 'review' && !cancelled()
           && needs.guard.outputs.comment_id != '' }}
         continue-on-error: true
@@ -1229,8 +1233,8 @@ jobs:
         run: |
           set -euo pipefail
           # An absent check file reads as an absent conclusion, which the case below
-          # answers by clearing. Returning here leaves an earlier attempt's thumb
-          # standing for a run that reached no verdict.
+          # answers by clearing. Returning here leaves the eyes standing, and a thumb an
+          # earlier attempt left, for a run that reached no verdict.
           conclusion=""
           if [ -s "$CHECK" ]; then
             # jq's error goes to the log and the value comes back on stdout, so a check
@@ -1246,24 +1250,28 @@ jobs:
           # neutral is what a review concludes when it cannot show it read the diff, and
           # a thumb up there says the change is fine when nobody looked at it.
           #
-          # The reaction and the one it replaces are chosen in one statement, so the
+          # The reaction and the ones it replaces are chosen in one statement, so the
           # two cannot drift apart.
-          # A conclusion earning no reaction still clears both. The comment carries what
-          # the last run left there, so a run that reaches neither verdict would otherwise
-          # leave the request wearing a thumb from a verdict this run did not reach.
+          #
+          # Every arm withdraws the eyes. The acknowledgement is a promise of an answer,
+          # and this step is where the answer arrives, so the arm that reaches no verdict
+          # withdraws them too -- and with them both thumbs. The comment carries what the
+          # last run left there, so a run that reaches neither verdict would otherwise
+          # leave the request wearing a verdict this run did not reach.
           case "$conclusion" in
-            failure) reaction="-1"; stale="+1" ;;
-            success) reaction="+1"; stale="-1" ;;
+            failure) reaction="-1"; stale="+1 eyes" ;;
+            success) reaction="+1"; stale="-1 eyes" ;;
             *)
               echo "a ${conclusion:-missing} conclusion earns no reaction; the verdict comment carries what it found"
-              reaction=""; stale="+1 -1" ;;
+              reaction=""; stale="+1 -1 eyes" ;;
           esac
 
-          # Withdraw this bot's stale thumbs first. A reaction is not a toggle and a
-          # re-run replays the same comment id, so a comment would otherwise wear a
+          # Withdraw this bot's stale reactions first: the eyes that acknowledged the
+          # trigger, and a thumb an earlier attempt left. A reaction is not a toggle and
+          # a re-run replays the same comment id, so a comment would otherwise wear a
           # verdict this run did not reach. Scoped to the reacting identity: a human who
           # thumbed the request down is voicing an opinion, and it is not this job's to
-          # delete.
+          # delete. The same scope leaves a human's eyes alone.
           #
           # GITHUB_TOKEN reacts as github-actions[bot], and an installation token cannot
           # ask the API which login it carries, so the login is named here.
@@ -1271,11 +1279,11 @@ jobs:
           # Listed into a variable, and read from it rather than through a pipe, so
           # nothing this block reports can be read back as a reaction id. Paginated,
           # because a busy comment carries more reactions than one page holds and a
-          # miss leaves the comment wearing both thumbs.
+          # miss leaves the request wearing the eyes, or a thumb this run replaces.
           if ! mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
                          --paginate \
                          --jq ".[] | select(.user.login == \"$me\") | \"\\(.content) \\(.id)\"")"; then
-            echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; a stale thumb from this bot may stay on it"
+            echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; the eyes or a stale thumb from this bot may stay on it"
             mine=""
           fi
           while read -r content rid; do
