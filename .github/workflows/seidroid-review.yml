@@ -3,11 +3,12 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # Reusable, comment-triggered agentic PR review, driven by the sei-agent-driver
 # binary from sei-protocol/sei-internal-skills. That module is where the reviewer's
 # logic and its prompt live; this file is the GitHub wiring around it, and the two
-# are versioned separately -- `uses:` pins this file, `driver-version` pins the
-# binary. A thin caller in the reviewed repo wires the triggers and calls this with
-# `uses:`. Flow: comment `@seidroid review` on a pull request
-# -> guard gate -> install and run the driver over one managed omnigent session ->
-# post the verdict as a new comment, the findings it can place, and a check run.
+# are versioned separately -- `uses:` pins this file, and this file pins the binary
+# through the `driver-version` default. A thin caller in the reviewed repo wires the
+# triggers and calls this with `uses:`. Flow: comment `@seidroid review` on a pull
+# request -> guard gate -> install and run the driver over one managed omnigent
+# session -> post the verdict as a new comment, the findings it can place, and a
+# check run.
 #
 # TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
 # wires that trigger and passes `mode: review`. A MANUAL one runs when a person
@@ -19,8 +20,10 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # running beside it; a repository that wires the automatic path here should retire
 # that caller in the same change, or every pull request is reviewed twice.
 #
-# The driver is installed with `go install` at `driver-version`, which the caller pins,
-# so a caller updates by bumping one ref and this file never copies driver logic. The session is
+# The driver is installed with `go install` at `driver-version`, which defaults to the
+# release this file drives, so every caller that omits the input runs one driver and one
+# conclusion vocabulary. The install step checks the binary it got against that contract
+# and fails there, before the review spends quota or takes a sandbox. The session is
 # keyed on the pull request and OUTLIVES the run, which is why `mode: close` exists:
 # it is the only thing that reclaims a sandbox.
 #
@@ -77,20 +80,27 @@ on:
           nested module there and moving this file did not move it. Passing a uci sha
           here fails the install with an unknown revision.
 
-          The module carries path-prefixed tags (sei-agent-driver/vX.Y.Z), but every
-          one of them predates the `review` subcommand and the SEIDROID_* variable
-          names this file uses -- v0.10.4 still exposes `xreview` and reads XREVIEW_*.
-          So pass a commit sha until a newer tag exists, and `go install` resolves it
-          to a pseudo-version.
+          LEAVE IT UNSET. The default is the release this file drives, and it is what
+          makes one conclusion mean one thing across callers: a gate written against
+          `success` in one repository then reads the same in the next. Set it only to
+          run AHEAD of the default, on a driver change that has shipped and this file
+          has not yet taken.
 
-          Verify the pin from an EMPTY module cache: a warm one is a false green,
-          because it resolves a pin the proxy may never have served.
+          Forward only. The install step below refuses a driver older than the default,
+          because the conclusion a review reaches for a given set of findings is
+          specific to the driver that reached it. Pin backward in this repository,
+          under review, rather than in a caller.
 
-          Required, with no default. A default ages silently against the subcommands and
-          inputs this file uses, and the caller finds out at run time. Pinning is the
-          caller's decision, so it is the caller's to state.
-        required: true
+          The module is nested, so the repository carries path-prefixed tags
+          (sei-agent-driver/vX.Y.Z) while `go install` takes the bare version. Pass
+          `v0.14.0`; `sei-agent-driver/v0.14.0` is refused as a disallowed version
+          string. A commit sha resolves to a pseudo-version.
+
+          Verify a pin from an EMPTY module cache: a warm one is a false green, because
+          it resolves a pin the proxy may never have served.
+        required: false
         type: string
+        default: 'v0.14.0'
       allowed-team:
         description: >-
           org/team-slug whose active members may ask for a review. Empty keeps the
@@ -644,23 +654,110 @@ jobs:
         shell: bash
         env:
           DRIVER_VERSION: ${{ inputs.driver-version }}
+          # Read by the floor below, which a close is exempt from.
+          MODE: ${{ inputs.mode }}
+          # Overrides the GOTOOLCHAIN=local that setup-go exports, for the reason that
+          # step gives above.
+          GOTOOLCHAIN: auto
+          # The oldest driver this file drives, and deliberately the same release as
+          # the driver-version default: a caller may run ahead of that default, never
+          # behind it. The conclusion a review reaches for a given set of findings is
+          # specific to the driver that reached it -- v0.12.0 concludes `success` where
+          # v0.11.0 concludes `neutral`, and v0.14.0 writes a `failure` check for a run
+          # that reaches no verdict where v0.13.0 writes none. A merge gate keyed on one
+          # of those is wrong for the others, so this file serves one and refuses the
+          # rest.
+          #
+          # Move this with the driver-version default above: one value in two places,
+          # and nothing enforces it. The two mistakes are not symmetric. Raising this
+          # alone fails every caller that omits the input, at once and in the open.
+          # Raising the default alone leaves a floor that goes on admitting a driver
+          # this file no longer drives -- the drift the whole check exists to catch, and
+          # the direction that says nothing while it happens.
+          MIN_DRIVER_VERSION: 'v0.14.0'
         run: |
           set -euo pipefail
+          # An input default applies only when the caller omits the key. A caller that
+          # passes the key through from its own optional input sends an empty string,
+          # which reaches go install as a bare trailing @. The floor is the default, so
+          # falling back to it here keeps the two the same value by construction rather
+          # than by the comment below asking.
+          DRIVER_VERSION="${DRIVER_VERSION:-$MIN_DRIVER_VERSION}"
+
           # sei-internal-skills is public, so there is no credential and no
           # GOPRIVATE. The module path below is absolute and did not change when this
           # file moved: the driver stays there.
           #
-          # The driver is a NESTED module, so what resolution consumes is the
-          # path-prefixed tag (sei-agent-driver/vX.Y.Z) or a sha, not a bare repo tag
-          # typed by hand. A sha is what a caller passes today, because every existing
-          # tag predates the `review` subcommand invoked below. go install turns it
-          # into a pseudo-version, which --version then prints, so the log names
-          # exactly what reviewed.
+          # The driver is a NESTED module. The repository carries path-prefixed tags
+          # (sei-agent-driver/vX.Y.Z) and `go install` refuses one as a disallowed
+          # version string; what it takes is the bare version, `v0.14.0`. A sha becomes
+          # a pseudo-version.
           out="$RUNNER_TEMP/bin"
           GOBIN="$out" go install \
             "github.com/sei-protocol/sei-internal-skills/sei-agent-driver/cmd/sei-agent-driver@${DRIVER_VERSION}"
-          "$out/sei-agent-driver" --version
-          echo "bin=$out/sei-agent-driver" >> "$GITHUB_OUTPUT"
+          bin="$out/sei-agent-driver"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+
+          # What go install resolved, read from the build info the toolchain stamped
+          # rather than from the binary's own --version, so a driver that changed how
+          # it reports itself still answers this. A sha pin reads here as the
+          # pseudo-version it became, so the log names exactly what reviewed.
+          version="$(go version -m "$bin" | awk '$1 == "mod" { print $3; exit }')"
+          echo "installed sei-agent-driver $version"
+
+          # THE CONTRACT CHECK. It fails here, before the driver holds a credential,
+          # opens a session or spends model quota -- a driver this file cannot drive
+          # should cost an install, not a review.
+          #
+          # Too old is the version floor above, and it is the review's alone. A close
+          # reaches no conclusion: it deletes the session, and it is the only thing that
+          # reclaims a sandbox, so holding it to the vocabulary would strand a live
+          # sandbox behind a caller edit. A close runs on whatever the caller pinned.
+          # The surface check below still covers it, and `--close` is the part of that
+          # surface this path needs.
+          #
+          # A pseudo-version carries the tag it follows, so a sha sorts against the
+          # floor the same way a release does, and semver puts a pre-release below its
+          # own core version.
+          at_least() {
+            printf '%s\n%s\n' "$1" "$2" | awk '
+              NR == 1 { split(substr($0, 2), got, /[-.+]/); pre = index($0, "-") > 0; next }
+              { split(substr($0, 2), want, /[.]/)
+                for (i = 1; i <= 3; i++) {
+                  if (got[i] + 0 > want[i] + 0) { exit 0 }
+                  if (got[i] + 0 < want[i] + 0) { exit 1 }
+                }
+                exit pre }'
+          }
+          if [ "$MODE" != "close" ] && ! at_least "$version" "$MIN_DRIVER_VERSION"; then
+            echo "::error::driver contract: sei-agent-driver $version is older than $MIN_DRIVER_VERSION, and reaches a different conclusion for the same findings; drop driver-version from the caller to take this workflow's own default"
+            exit 1
+          fi
+
+          # Too new, or simply not this driver: a renamed subcommand or a renamed flag
+          # is a contract this file no longer speaks. `review --help` is the whole
+          # surface this file drives and the only part of it a check can read without a
+          # credential and without a session. What --help cannot see -- the SEIDROID_*
+          # variable names and the check.json fields -- still fails at run time.
+          if ! usage="$("$bin" review --help 2>&1)"; then
+            echo "::error::driver contract: sei-agent-driver $version has no \`review\` subcommand, which this workflow invokes"
+            exit 1
+          fi
+          # Every long flag the help names, wherever it sits on the line. Anchoring to
+          # the start of the line reads only `  --out string`, and cobra prints a flag
+          # that has a shorthand as `  -o, --out string` -- so adding a shorthand, which
+          # takes nothing away, would report the flag as missing and fail every review.
+          supported="$(printf '%s\n' "$usage" | grep -oE -- '--[a-z0-9-]+' \
+            | sed 's/^/ /; s/$/ /' | tr -d '\n')"
+          missing=""
+          for flag in --out --findings-out --check-out --close --conversation-context \
+                      --guidelines-file --extra-instructions --trigger-id; do
+            case "$supported" in (*" $flag "*) ;; (*) missing="$missing $flag" ;; esac
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::driver contract: sei-agent-driver $version does not accept \`review\`$missing, which this workflow passes"
+            exit 1
+          fi
 
       - name: Mint the reviewing identity
         # A review is the bot's work, and the identity on it is what a reader
