@@ -271,7 +271,13 @@ on:
         description: "omnigent machine-client secret, exchanged in-process for a session bearer. Mirrors the server's OMNIGENT_MACHINE_CLIENT_SECRET_HASH -- the server stores only a digest of this value. The one secret an operator must configure to use this workflow."
         required: true
       SEIDROID_APP_ID:
-        description: "seidroid GitHub App id. Optional: without it the review posts as the workflow's own identity, which is correct but reads as github-actions rather than the bot."
+        description: >-
+          seidroid GitHub App id. Optional: without it the review posts as the
+          workflow's own identity, which is correct but reads as github-actions rather
+          than the bot. That identity also may not clear a block the App left, so a
+          repository that removes this credential after the App has recorded
+          CHANGES_REQUESTED can leave every later clean run failing on the dismissal
+          it cannot perform. Dismiss those reviews by hand when you remove it.
         required: false
       SEIDROID_APP_PRIVATE_KEY:
         description: "seidroid GitHub App private key, exchanged for an installation token scoped to the calling repository. Never written to an output; the action masks it."
@@ -1253,14 +1259,28 @@ jobs:
           # commit_id is omitted rather than sent empty when the commit is unknown:
           # the API rejects an empty one, and its own default is the pull request's
           # latest commit, which is the fallback announced above.
+          #
+          # 0 posted, 2 refused, 1 anything else. Only a refusal earns the rung below:
+          # a 403 or a 422 is the API saying this identity may not hold this opinion,
+          # and every other failure is one a second call would meet again. That keeps a
+          # write that landed and then lost its connection from posting a second review.
+          #
+          # A 422 also covers a stale commit_id, which the rung retries with the same
+          # commit_id and meets identically. That costs one call and no review.
+          #
+          # The API's own error still reaches stderr, where it says why.
           post_position() {
-            local args
+            local args err rc
             args=(-X POST "repos/$REPO/pulls/$PR/reviews"
                   -f event="$1" -f body="$MARKER"$'\n'"$note")
             if [ -n "$head_sha" ]; then
               args+=(-f commit_id="$head_sha")
             fi
-            gh api "${args[@]}" >/dev/null
+            err="$(gh api "${args[@]}" 2>&1 >/dev/null)" && return 0
+            rc=1
+            case "$err" in (*"HTTP 403"*|*"HTTP 422"*) rc=2 ;; esac
+            printf '%s\n' "$err" >&2
+            return "$rc"
           }
 
           if [ -n "$event" ]; then
@@ -1277,9 +1297,11 @@ jobs:
             # reviewers list still carries this run, and the check run still carries
             # the gate. What the rung costs is the vote: an APPROVE that lands here
             # clears no approval requirement, and a REQUEST_CHANGES blocks nothing.
-            if post_position "$event"; then
+            rc=0
+            post_position "$event" || rc=$?
+            if [ "$rc" -eq 0 ]; then
               echo "recorded $event on $REPO#$PR"
-            elif post_position COMMENT; then
+            elif [ "$rc" -eq 2 ] && post_position COMMENT; then
               echo "::warning::$REPO#$PR would not take $event, so this review is recorded as a comment; the check run carries the $conclusion conclusion"
             else
               echo "::warning::could not record $event on $REPO#$PR; the verdict comment stands"
