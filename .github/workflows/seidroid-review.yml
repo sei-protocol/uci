@@ -1150,12 +1150,52 @@ jobs:
           # keeps a pull request red for a finding that is gone, and only a human
           # can clear it.
           #
-          # A clean run only. A failure stands behind its own block. A neutral
-          # conclusion is what a review reaches when it cannot show it read the diff,
-          # so it has no ground to clear another review's finding -- and the dismissal
-          # message below would claim a reading that did not happen.
-          if [ "$conclusion" != "success" ]; then
+          # Withdrawn on the two things this run has to be able to say: it read the
+          # change, and it found nothing blocking in it. A failure says the second is
+          # false and stands behind its own block.
+          if [ "$conclusion" = "failure" ]; then
             exit 0
+          fi
+          # success says both, because the driver gates it on the line count the review
+          # reported. neutral says one word over three states -- a review that could not
+          # show it read the diff, a review whose only blocker is already on the base
+          # branch, and a review whose findings are all non-blocking. Only the first has
+          # no ground to clear another review's finding, and the counts are what separate
+          # it: something written down is a review of the change, and nothing written down
+          # beside a soft conclusion is a review that did not happen.
+          #
+          # Read under `counts`, where the driver writes them, with a sentinel for the
+          # field it does not: a bare null is a value the arithmetic below would take for
+          # a zero, and a driver that reports nothing would then read as a review that
+          # found nothing.
+          is_count() { case "${1:-}" in (''|*[!0-9]*) return 1 ;; esac; }
+          blocking="" non_blocking="" pre_existing="" counted=false
+          read -r blocking non_blocking pre_existing < <(jq -r '[(.counts.blocking // "?"),
+            (.counts.non_blocking // "?"), (.counts.pre_existing // "?")] | @tsv' \
+            "$CHECK" 2>/dev/null) || true
+          if is_count "$blocking" && is_count "$non_blocking" && is_count "$pre_existing"; then
+            counted=true
+          fi
+
+          # A blocking finding beside a conclusion that does not fail is the driver
+          # disagreeing with itself, and the comment step states it as that. Here it
+          # stops the withdrawal: whichever half is wrong, clearing a merge gate while
+          # the review names a blocker is the one outcome that cannot be walked back.
+          if [ "$counted" = true ] && [ "$blocking" -gt 0 ]; then
+            echo "::warning::the review reports $blocking blocking finding(s) beside a $conclusion conclusion, so it does not clear an earlier block on $REPO#$PR"
+            exit 0
+          fi
+          if [ "$conclusion" != "success" ] && [ "$counted" = true ] \
+             && [ $(( blocking + non_blocking + pre_existing )) -eq 0 ]; then
+            echo "::notice::a $conclusion review that wrote nothing down does not clear an earlier block on $REPO#$PR"
+            exit 0
+          fi
+          # A driver that writes no counts leaves the three states indistinguishable, and
+          # the withdrawal proceeds rather than stopping. Stopping strands the block
+          # behind every re-review whose findings are all non-blocking, which that driver
+          # also concludes neutral, and which is what most re-reviews find.
+          if [ "$conclusion" != "success" ] && [ "$counted" = false ]; then
+            echo "::warning::no finding counts beside a $conclusion conclusion on $REPO#$PR, so a review that found only notes reads the same as one that read nothing; the withdrawal proceeds on the conclusion alone. A driver from v0.11.0 writes the counts"
           fi
           # Listed into a variable, and read from it rather than through a pipe. A
           # report written into a pipe the loop reads is not an annotation Actions
@@ -1177,7 +1217,7 @@ jobs:
           while read -r id; do
             [ -n "$id" ] || continue
             if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$id/dismissals" \
-                 -f message="Superseded: the latest review found nothing blocking." \
+                 -f message="Superseded: the latest review found nothing blocking in this change." \
                  -f event=DISMISS >/dev/null; then
               withdrawn=$((withdrawn+1))
               echo "withdrew review $id"
