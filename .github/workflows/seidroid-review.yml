@@ -301,8 +301,13 @@ jobs:
     runs-on: ubuntu-latest
     # A step condition cannot read `secrets`, so its presence is tested here and
     # read back as `env` below — the same shape the review job uses.
+    #
+    # Both halves of the credential, because the mint below needs both and carries no
+    # continue-on-error. An id with no private key would run that step, fail it, and
+    # take the job with it -- where the App is optional and the answer is to fall back.
     env:
-      HAS_REVIEWER_IDENTITY: ${{ secrets.SEIDROID_APP_ID != '' }}
+      HAS_REVIEWER_IDENTITY: >-
+        ${{ secrets.SEIDROID_APP_ID != '' && secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
     # Set at all because the account default is six hours. The guard only reads
     # API state, so a minute is generous.
     timeout-minutes: 5
@@ -600,7 +605,10 @@ jobs:
       # read. The secrets context is not one of those -- a step `if` that touches
       # it is a workflow-file error, not a false condition -- so the presence test
       # happens here, the same way the machine-client check below does it.
-      HAS_REVIEWER_IDENTITY: ${{ secrets.SEIDROID_APP_ID != '' }}
+      #
+      # Both halves, for the reason the guard's copy states.
+      HAS_REVIEWER_IDENTITY: >-
+        ${{ secrets.SEIDROID_APP_ID != '' && secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
     steps:
       # First, deliberately: the reaction is the only signal the trigger was
       # seen, and everything after it -- toolchain, driver install, session
@@ -1261,9 +1269,19 @@ jobs:
           # latest commit, which is the fallback announced above.
           #
           # 0 posted, 2 refused, 1 anything else. Only a refusal earns the rung below:
-          # a 403 or a 422 is the API saying this identity may not hold this opinion,
-          # and every other failure is one a second call would meet again. That keeps a
-          # write that landed and then lost its connection from posting a second review.
+          # a 422 is the API declining the opinion itself, and every other failure is
+          # one a second call would meet again. That keeps a write that landed and then
+          # lost its connection from posting a second review.
+          #
+          # 422, and not 403. GitHub answers a self-review with 422 -- measured, as
+          # "Review Can not approve your own pull request" -- and answers a secondary
+          # rate limit with 403 or 429. This endpoint creates content and notifies, so
+          # it is one the API names as tripping that limit. A rung that fired on 403
+          # would turn a rate-limited REQUEST_CHANGES into a comment that blocks
+          # nothing, where one wait would have kept the block. The narrow rule costs
+          # the opposite case: a refusal that arrives as 403, such as an Actions policy
+          # that forbids an approval, earns no comment review and only the warning
+          # below. Losing the vote is the worse half, so the rule protects it.
           #
           # A 422 also covers a stale commit_id, which the rung retries with the same
           # commit_id and meets identically. That costs one call and no review.
@@ -1278,7 +1296,7 @@ jobs:
             fi
             err="$(gh api "${args[@]}" 2>&1 >/dev/null)" && return 0
             rc=1
-            case "$err" in (*"HTTP 403"*|*"HTTP 422"*) rc=2 ;; esac
+            case "$err" in (*"HTTP 422"*) rc=2 ;; esac
             printf '%s\n' "$err" >&2
             return "$rc"
           }
