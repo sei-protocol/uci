@@ -404,6 +404,20 @@ permissions: {}
 # reviewed.
 env:
   VERDICT_MARKER: "<!-- seidroid-review -->"
+  # What stamps an inline finding as this tool's, read by every step that has to
+  # recognise one: the step that writes it, the step that reads the history back, and
+  # the step that closes a thread. One value, because a drift between them fails in the
+  # worst direction and with no error -- placement keeps stamping the old marker while
+  # the other two stop matching it, and every finding duplicates again on a green run.
+  #
+  # Beside VERDICT_MARKER rather than in the review job, though only that job reads it.
+  # Two markers in two scopes is how a third one ends up defined somewhere else again.
+  #
+  # Not named MARKER. One step below still carries a step-level MARKER of its own, for
+  # the no-verdict notice, and a step-level key shadows a workflow-level one silently --
+  # so a bare MARKER here would work today and become a trap for whichever step later
+  # forgot to set its own.
+  FINDING_MARKER: "<!-- seidroid-review:finding -->"
 
 jobs:
   guard:
@@ -1137,6 +1151,48 @@ jobs:
           # Both keys, together, for the reason the guard's mint states.
           repositories: ${{ github.event.repository.name }}
 
+      - name: Name the identity this review posts under
+        # The logins every step below compares a comment's author against, so a thread
+        # this tool wrote is told apart from one that merely quotes its marker. One
+        # place, for the reason FINDING_MARKER is one place: two steps computing them
+        # from expressions of their own drift, and a drift here reads as a pull request
+        # this reviewer has never touched.
+        #
+        # Two of them, because reading and mutating do not carry the same risk.
+        # REVIEWER_LOGIN is the identity this run uses and is the only one allowed to
+        # have written a thread this run closes. WORKFLOW_LOGIN is what a run without
+        # App credentials posts as, and the history read admits it too: a repository
+        # that has moved between the two would otherwise lose its whole history, and a
+        # review that re-reports every finding it already made and can close none of
+        # them is worse than one that simply closes none.
+        #
+        # It cannot ride in the job's env block. That is evaluated before any step runs
+        # and the app slug is a step output, so this exports to $GITHUB_ENV instead and
+        # the steps below read a plain variable.
+        #
+        # Without app credentials the identity step is skipped and every step here falls
+        # back to the workflow's own token, which posts as github-actions.
+        #
+        # continue-on-error, like the other steps that improve publishing without being
+        # allowed to prevent reviewing. Every reader treats an unset value as matching no
+        # author, so a failure here costs the history and the thread closing, and says so
+        # rather than closing the wrong thread.
+        if: ${{ inputs.mode == 'review' && !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          APP_SLUG: ${{ steps.identity.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          # The identity a run without App credentials posts under. Written here rather
+          # than spelled again in each reader, so the two logins come from one place.
+          workflow_login="github-actions[bot]"
+          login="$workflow_login"
+          if [ -n "${APP_SLUG:-}" ]; then login="${APP_SLUG}[bot]"; fi
+          echo "REVIEWER_LOGIN=$login" >> "$GITHUB_ENV"
+          echo "WORKFLOW_LOGIN=$workflow_login" >> "$GITHUB_ENV"
+          echo "this review reads and posts as $login"
+
       - name: Read the threads this review left before
         id: threads
         # What this reviewer said last time, and what the author said back. Read
@@ -1144,8 +1200,23 @@ jobs:
         # must perform is a step it can skip, and prose the author controls should
         # not travel through a shell to get here.
         #
-        # Its own threads only. ai-review posts under the same bot identity, so the
-        # marker every inline comment carries is what tells the two apart.
+        # Its own threads only, on two tests, and both have to hold.
+        #
+        # The marker has to OPEN the body, not merely appear in it. Placement writes it
+        # as the first bytes, and every verdict-side reader in this file keys the same
+        # way. A contains test admits any comment that quotes the marker instead -- and
+        # ai-review posts under the same bot identity, so one of its inline comments
+        # quoting this file's FINDING_MARKER line, on the repository that defines it,
+        # would pass an author test as well and be read back as a finding this tool
+        # left.
+        #
+        # The author has to be one this tool posts as: this run's identity, or the
+        # workflow token's. Either, here, because reading is inert; the step that
+        # closes a thread takes this run's identity alone.
+        #
+        # The thread id travels with each one. It is minted here, when the comment
+        # posts, and the driver's session has no way to learn it -- so this read is
+        # where a review gets the handle it names to close a finding it has addressed.
         #
         # continue-on-error, and the driver reads an absent file as a first review:
         # a history that cannot be fetched must cost the recall, not the review.
@@ -1169,6 +1240,7 @@ jobs:
                 pullRequest(number: $number) {
                   reviewThreads(first: 100) {
                     nodes {
+                      id
                       isResolved
                       path
                       line
@@ -1183,14 +1255,41 @@ jobs:
           # line goes null once a thread is stale against the head commit, and
           # originalLine still says where it was written -- which is what makes a
           # thread on since-rewritten code readable rather than a finding at line 0.
+          #
+          # thread_id is the handle a review names to close one. The driver admits an id
+          # only when it matches a thread listed here, so this file is the allowlist as
+          # well as the history, and a thread left out of it can be named and not closed.
+          #
+          # The marker and the login reach jq through $ENV rather than through the shell,
+          # so the program stays one single-quoted string and no comment body is ever
+          # spliced into it.
+          # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           jq '[ .data.repository.pullRequest.reviewThreads.nodes[]
-                | select((.comments.nodes[0].body // "") | contains("<!-- seidroid-review:finding -->"))
-                | { file: (.path // ""),
+                | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
+                | select(.comments.nodes[0].author.login
+                         | . != null and . != ""
+                           and (. == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))
+                | { thread_id: (.id // ""),
+                    file: (.path // ""),
                     line: (.line // .originalLine // 0),
-                    body: ((.comments.nodes[0].body // "") | sub("<!-- seidroid-review:finding -->\n*"; "")),
+                    body: ((.comments.nodes[0].body // "") | sub($ENV.FINDING_MARKER + "\n*"; "")),
                     replies: [ .comments.nodes[1:][] | "\(.author.login // "someone"): \(.body)" ],
                     resolved: .isResolved } ]' "$THREADS.raw" > "$THREADS"
-          echo "carrying $(jq length "$THREADS") prior finding(s) into this review"
+          carried="$(jq length "$THREADS")"
+          echo "carrying $carried prior finding(s) written by ${REVIEWER_LOGIN:-nobody this run could name} or ${WORKFLOW_LOGIN:-nobody} into this review"
+
+          # A marked thread that the login test drops is worth a line, because the two
+          # ways to get here look identical from the outside: this reviewer has left
+          # nothing on the pull request yet, or it has and this run does not recognise
+          # its own identity. Only the second is a defect, and it costs the review its
+          # history and its ability to close a single thread.
+          # shellcheck disable=SC2016  # $ENV is jq's
+          marked="$(jq '[ .data.repository.pullRequest.reviewThreads.nodes[]
+                          | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
+                        ] | length' "$THREADS.raw")"
+          if [ "$marked" -gt 0 ] && [ "$carried" -eq 0 ]; then
+            echo "::warning::$marked thread(s) on $REPO#$PR open with this tool's marker and none was written by ${REVIEWER_LOGIN:-nobody this run could name} or ${WORKFLOW_LOGIN:-nobody}, so this review carries no history and can close no thread"
+          fi
 
       - name: Record the commit under review
         id: head
@@ -1344,9 +1443,6 @@ jobs:
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           FINDINGS: ${{ steps.drive.outputs.findings_path }}
-          # Marks every inline comment as this tool's, so a reader can tell an
-          # review note from ai-review's and a later run can find its own.
-          MARKER: "<!-- seidroid-review:finding -->"
           # Findings that reached neither a line nor a file, collected for the
           # summary. Declared here so the step below can read it by output.
           NOTE: ${{ runner.temp }}/review-unplaced.md
@@ -1383,7 +1479,7 @@ jobs:
           while IFS=$'\t' read -r path line side severity detail_b64; do
             [ -z "$path" ] && continue
             detail="$(printf '%s' "$detail_b64" | base64 --decode)"
-            body="$MARKER"$'\n'"**${severity}** — ${detail}"
+            body="$FINDING_MARKER"$'\n'"**${severity}** — ${detail}"
             # Guarded on the commit, not left to the API. Without one both calls
             # return 422, and asking twice per finding for that answer spends the
             # rate limit on a result already known before the loop.
@@ -2195,6 +2291,188 @@ jobs:
           else
             echo "::warning::no reviewed commit was recorded, so there is no check run to fail; the annotation on this run is the only record"
           fi
+
+      - name: Resolve the threads this review closed
+        # A finding that still holds gets a new thread on every re-review while the old
+        # one stays open. On one live pull request 5 of 13 threads were byte-identical
+        # repeats of two findings, so a third re-review has the author read one finding
+        # in three places and dismiss it three times. The driver names which of its own
+        # threads this review closed; this closes them.
+        #
+        # Two lists, two gates. `addressed` is a finding the diff no longer shows, so it
+        # closes whenever the review published. `superseded` is a finding restated as a
+        # new comment, so it closes only once every comment reached the code -- a thread
+        # shut behind a comment that never posted takes a live finding off the pull
+        # request and puts nothing where it was.
+        #
+        # That second gate is per REVIEW, not per thread, and the residual is worth
+        # knowing. It reads the placement counts, which say how many comments landed and
+        # how many did not; it cannot say which comment was the replacement for which
+        # thread, because neither the findings file nor check.json carries that link. So
+        # it demands that placement dropped nothing at all: one unplaced comment holds
+        # every superseded thread open, including the ones whose replacement did post.
+        # Erring that way costs a duplicate thread, and the other way costs a live
+        # finding. A per-thread gate needs the driver to carry the link.
+        #
+        # Last of the publishers, so nothing old closes before the new review is on the
+        # pull request.
+        #
+        # Every id is checked here as well as in the driver. The driver refuses an id
+        # that matches no thread it was handed; this refuses one that is not, right now,
+        # an unresolved thread this reviewer wrote. The mutation is on someone else's
+        # pull request and the ids come from model output, so the check runs beside the
+        # call rather than only upstream of it.
+        #
+        # REVIEWER_LOGIN alone, where the history read admits WORKFLOW_LOGIN beside it.
+        # Reading a thread this run did not write costs nothing; closing one is a
+        # mutation, and it stays as narrow as the identity performing it.
+        #
+        # continue-on-error, like every publisher in this job. A review that ran and
+        # published must not be failed over a thread it could not close: the cost of not
+        # closing one is the duplicate this workflow leaves today.
+        #
+        # resolveReviewThread is a pull-request operation. GitHub categorises it under
+        # pulls and publishes no permission requirement of its own for it, and this job
+        # grants pull-requests: write. So a refusal names the identity rather than the
+        # thread, and the warning below reports which identity the API refused.
+        #
+        # First 100 threads, as the history read takes them. A pull request past that is
+        # PLT-1162's.
+        if: ${{ inputs.mode == 'review' && !cancelled()
+          && steps.drive.outputs.verdict_produced == 'true' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
+          # The driver's plan, in the file this job already reads to publish the check
+          # run. An older driver writes no `threads` key, and this step then closes
+          # nothing -- which is what the workflow did before it could.
+          CHECK: ${{ steps.drive.outputs.check_path }}
+          # What placement managed, and what it could not place. A superseded thread
+          # closes only when comments reached the code and none was left over.
+          PLACED_ON_LINE: ${{ steps.place.outputs.on_line }}
+          PLACED_ON_FILE: ${{ steps.place.outputs.on_file }}
+          PLACED_UNPLACED: ${{ steps.place.outputs.unplaced }}
+        run: |
+          set -euo pipefail
+          # What the API said, on one line and bounded. A warning that reports only
+          # "could not be resolved" tells an operator nothing to act on, and the message
+          # is the difference between a thread somebody else already touched and a
+          # credential that cannot do this at all.
+          saidIt() { printf '%s' "${1:-}" | tr '\n\r' '  ' | cut -c1-300; }
+          apiSaid() { saidIt "$(cat "$1" 2>/dev/null)"; }
+
+          if [ ! -s "${CHECK:-}" ]; then
+            echo "no check file, so nothing names a thread to close"
+            exit 0
+          fi
+
+          # The driver already refused these against the history it was handed. Repeated
+          # here because this is where a person reading the run sees it, and an invented
+          # id means the review is naming threads that do not exist.
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            echo "::warning::the review named review thread '$id', which is not one this tool left on $REPO#$PR; it was not resolved"
+          done < <(jq -r '.threads.refused // [] | .[]' "$CHECK")
+
+          wanted="$(jq -r '.threads.addressed // [] | .[]' "$CHECK")"
+          # Both halves are required. Counting only what landed lets one unrelated new
+          # finding on a line stand in for three superseded replacements that landed
+          # nowhere -- and those three threads would close with the findings that
+          # replaced them sitting in the summary instead of on the diff.
+          #
+          # The default in ${PLACED_UNPLACED:-1} is deliberate and is not a count. An
+          # absent output means placement did not report, which has to read as "something
+          # may be unplaced" rather than as zero: this gate decides whether a live
+          # finding comes off the pull request, so the unknown falls on the side that
+          # leaves the thread open.
+          placed=$(( ${PLACED_ON_LINE:-0} + ${PLACED_ON_FILE:-0} ))
+          held="$(jq -r '.threads.superseded // [] | length' "$CHECK")"
+          if [ "$placed" -gt 0 ] && [ "${PLACED_UNPLACED:-1}" -eq 0 ]; then
+            wanted="$wanted"$'\n'"$(jq -r '.threads.superseded // [] | .[]' "$CHECK")"
+          elif [ "$held" -gt 0 ]; then
+            echo "$held superseded thread(s) stay open: $placed comment(s) reached the code and ${PLACED_UNPLACED:-an unreported number} could not be placed"
+          fi
+          wanted="$(printf '%s\n' "$wanted" | sed '/^$/d' | sort -u)"
+          if [ -z "$wanted" ]; then
+            echo "this review closes no thread"
+            exit 0
+          fi
+
+          owner="${REPO%%/*}"; name="${REPO##*/}"
+          state="$RUNNER_TEMP/review-resolve-threads.json"
+          # Read again here rather than reused from the history step. Minutes of review
+          # sit between the two, and a thread an author resolved in that time is one this
+          # step must not report as its own doing.
+          #
+          # $owner and friends are GraphQL variables, so the query stays literal.
+          # shellcheck disable=SC2016
+          if ! gh api graphql -f query='
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  reviewThreads(first: 100) {
+                    nodes {
+                      id
+                      isResolved
+                      comments(first: 1) { nodes { body author { login } } }
+                    }
+                  }
+                }
+              }
+            }' -F owner="$owner" -F name="$name" -F number="$PR" > "$state" 2> "$state.err"; then
+            echo "::warning::the review threads on $REPO#$PR could not be read as ${REVIEWER_LOGIN:-an unnamed identity}: $(apiSaid "$state.err"); no thread was closed and the author sees each restated finding twice"
+            exit 0
+          fi
+
+          # Two sets, because they answer two different questions and only one of them is
+          # a warning. `ours` is every thread this reviewer wrote, whatever its state, so
+          # a thread already resolved reads as done rather than as an id somebody
+          # invented. `open` is the subset there is still something to do to.
+          # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
+          own='.data.repository.pullRequest.reviewThreads.nodes[]
+                | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
+                | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)'
+          ours="$(jq -r "$own | .id" "$state")"
+          open="$(jq -r "$own | select(.isResolved | not) | .id" "$state")"
+
+          closed=0 refused=0 failed=0
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            if ! printf '%s\n' "$open" | grep -qxF -- "$id"; then
+              if printf '%s\n' "$ours" | grep -qxF -- "$id"; then
+                echo "review thread $id is already resolved; nothing to do"
+              else
+                echo "::warning::review thread '$id' is not an unresolved thread this tool left on $REPO#$PR; it was not resolved"
+                refused=$((refused+1))
+              fi
+              continue
+            fi
+            # Both streams are captured, because gh splits a failure across them: the
+            # API's error body goes to stdout and gh's own line to stderr, and either
+            # alone can be the half that says why. Discarded on success.
+            # shellcheck disable=SC2016  # $threadId is GraphQL's
+            if out="$(gh api graphql -f query='
+              mutation($threadId: ID!) {
+                resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
+              }' -F threadId="$id" 2>&1)"; then
+              closed=$((closed+1))
+            else
+              echo "::warning::review thread $id on $REPO#$PR was not resolved as ${REVIEWER_LOGIN:-an unnamed identity}: $(saidIt "$out"); it stays open and the author reads this finding twice"
+              # A refusal is about the identity rather than the thread, and which
+              # identity ran decides what to change. An App installation token carries
+              # the App's own permissions and this job's permissions block does not
+              # narrow it; the workflow token carries only what that block granted.
+              case "$out" in
+                *"not accessible by integration"*|*Forbidden*|*"HTTP 403"*|*"must have"*)
+                  echo "::warning::that refusal names the identity, not the thread. ${REVIEWER_LOGIN:-the identity this run used} was refused resolveReviewThread on $REPO#$PR: an App identity carries the App installation's permissions, and github-actions carries only what this job's permissions block grants" ;;
+              esac
+              failed=$((failed+1))
+            fi
+          done <<< "$wanted"
+          echo "threads: $closed closed, $refused refused, $failed could not be resolved"
 
       - name: Report a review that reached no verdict
         # The step above answers a review that decided; this one answers a review that
