@@ -115,8 +115,13 @@ on:
           request opened by anyone.
 
           The membership read takes "Members" organization permissions, which a
-          GITHUB_TOKEN cannot carry. The check therefore needs the App identity, and
-          a caller that configures no App is refused on the comment path.
+          GITHUB_TOKEN cannot carry. Only the App identity can answer it, so a caller
+          that configures no App is refused on the comment path. Pass SEIDROID_APP_ID
+          and SEIDROID_APP_PRIVATE_KEY to use that path. Setting this input empty is
+          not the way out: empty denies.
+
+          Two things still work without the App. An automatic pull_request review
+          never reaches this check, and neither does `@seidroid review close`.
         required: false
         type: string
         default: 'sei-protocol/sei-core'
@@ -370,9 +375,14 @@ on:
         required: true
       SEIDROID_APP_ID:
         description: >-
-          seidroid GitHub App id. Optional: without it the review posts as the
-          workflow's own identity, which is correct but reads as github-actions rather
-          than the bot.
+          seidroid GitHub App id. Optional for an automatic review, REQUIRED to ask
+          for one by comment.
+
+          Without it the review posts as the workflow's own identity, which is correct
+          but reads as github-actions rather than the bot. And the guard's team check
+          cannot read organisation membership, so it refuses every `@seidroid review`
+          comment and says why in the run log. An automatic pull_request review and
+          `@seidroid review close` still run.
 
           Changing it changes who withdraws a block. A protected branch that restricts
           who may dismiss a review takes the dismissal only from a repository admin or
@@ -644,12 +654,21 @@ jobs:
           # An automatic run has no commander: applying the team check there would
           # silently stop reviewing every pull request opened by anyone outside the
           # team, which is the opposite of what a caller sets this input for.
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          #
+          # It stops a REVIEW, not a teardown, for the reason the label check below
+          # states. Any collaborator the job condition admits may reclaim a sandbox,
+          # whether or not they are on the team, because the alternative is a sandbox
+          # nothing reclaims.
+          #
+          # Reading an organisation's teams needs the App identity, so a caller that
+          # configures no App is refused here. The notice says so, and names the one
+          # thing that fixes it.
+          if [ "$EVENT_NAME" != "pull_request" ] && [ "$MODE" != "close" ]; then
             case "$ALLOWED_TEAM" in
               */*) ;;
               *) deny "allowed-team is empty or is not org/team-slug; denying" ;;
             esac
-            [ -n "${GH_TOKEN:-}" ] || deny "no identity to read membership of ${ALLOWED_TEAM}; denying. Pass SEIDROID_APP_ID and SEIDROID_APP_PRIVATE_KEY"
+            [ -n "${GH_TOKEN:-}" ] || deny "this run holds no App identity, so it cannot read membership of $ALLOWED_TEAM; denying. Pass SEIDROID_APP_ID and SEIDROID_APP_PRIVATE_KEY to this workflow. An automatic pull_request review and @seidroid review close do not reach this check"
             state="$(gh api "orgs/${ALLOWED_TEAM%%/*}/teams/${ALLOWED_TEAM##*/}/memberships/${ACTOR}"               --jq .state 2>/dev/null || true)"
             [ "$state" = "active" ] || deny "$ACTOR is not an active member of $ALLOWED_TEAM; denying"
           fi
