@@ -159,6 +159,30 @@ on:
         required: false
         type: string
         default: 'ai: skip-review'
+      nitpick-label:
+        description: >-
+          A label on the reviewed pull request that puts every nit-grade finding on
+          the line it is about, as a comment thread of its own. Empty disables the
+          check.
+
+          Without the label a nit is still reported. The driver sends it to the
+          non-blocking bucket instead, where the verdict comment and the check run
+          summary both carry it as prose and no thread opens on the code. So this
+          chooses where a nit lands, not whether the review makes one.
+
+          It also decides what a nit may close. A thread this reviewer left before
+          is superseded by the comment that restates it, and a nit that opens no
+          comment supersedes nothing.
+
+          The name matches ai-review.yml's, so a repository running both tools adds
+          one label rather than two.
+
+          Adding it starts no review. This workflow reviews a pull request once, and
+          a relabel earns no second one, so label the pull request and then comment
+          `@seidroid review`.
+        required: false
+        type: string
+        default: 'ai: nitpick'
       re-review-on-push:
         description: >-
           Review again on every push to a pull request this workflow has already
@@ -1140,7 +1164,8 @@ jobs:
             | sed 's/^/ /; s/$/ /' | tr -d '\n')"
           missing=""
           for flag in --out --findings-out --check-out --close --conversation-context \
-                      --guidelines-file --extra-instructions --trigger-id; do
+                      --guidelines-file --extra-instructions --include-nits \
+                      --trigger-id; do
             case "$supported" in (*" $flag "*) ;; (*) missing="$missing $flag" ;; esac
           done
           if [ -n "$missing" ]; then
@@ -1342,6 +1367,51 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "reviewing $REPO#$PR at $sha"
 
+      - name: Read the nit setting from the pull request
+        id: nits
+        # The author of one pull request is who asks for a polish pass, so the ask
+        # is a label on that pull request rather than a setting in the caller.
+        #
+        # Its own step, and not part of the drive step below, because the read needs
+        # a GitHub token and that step's env reaches the driver process. Keeping the
+        # token here is what keeps the driver's credentials to omnigent alone.
+        #
+        # It costs one read of the pull request. The guard reads the same object for
+        # the skip label, under the App identity alone; this one has to answer a
+        # caller that configured no App as well, so it takes the identity above and
+        # its own call rather than a share of that one.
+        if: ${{ inputs.mode == 'review' && !cancelled() && inputs.nitpick-label != '' }}
+        # An opt-in for advice must not be able to stop a review. A step that fails
+        # leaves the output unset, the drive step reads that as off, and the review
+        # runs with nits off.
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
+          NITPICK_LABEL: ${{ inputs.nitpick-label }}
+        run: |
+          set -euo pipefail
+          # A label that is absent and a read that failed both leave nits off, so the
+          # warning below is the only thing that tells them apart in the log. It is
+          # where a polish pass that was asked for and did not happen is explained.
+          #
+          # Off, and not a refusal, because this label asks for advice rather than
+          # withholding work. The guard refuses on a signal it could not read, because
+          # admitting there runs a review it should not have run. Admitting here runs
+          # the review that was asked for, carrying one fewer kind of finding.
+          read_ok=true
+          # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+          carries="$(gh api "repos/$REPO/pulls/$PR" \
+            --jq 'any(.labels[]?.name; . == $ENV.NITPICK_LABEL)')" || read_ok=false
+          if [ "$read_ok" = "false" ]; then
+            echo "::warning::could not read the labels on $REPO#$PR, so $NITPICK_LABEL cannot be found; this review runs without nits"
+          fi
+          if [ "$carries" != "true" ]; then carries=false; fi
+          echo "include_nits=$carries" >> "$GITHUB_OUTPUT"
+          echo "include nits on $REPO#$PR: $carries"
+
       - name: Drive session + collect verdict
         id: drive
         shell: bash
@@ -1366,6 +1436,7 @@ jobs:
           THREADS: ${{ steps.threads.outputs.threads_path }}
           GUIDELINES_FILE: ${{ inputs.guidelines-file }}
           EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
+          INCLUDE_NITS: ${{ steps.nits.outputs.include_nits }}
         run: |
           set -euo pipefail
           # OMNIGENT_MACHINE_CLIENT_ID/SECRET are already in the job env (see
@@ -1408,6 +1479,10 @@ jobs:
             if [ -n "${EXTRA_INSTRUCTIONS:-}" ]; then
               args+=(--extra-instructions "$EXTRA_INSTRUCTIONS")
             fi
+            # Off means redirected rather than dropped: without this flag the driver
+            # sends a nit-grade finding to the non-blocking bucket, so it reaches the
+            # reader in prose and opens no thread on the line.
+            if [ "${INCLUDE_NITS:-}" = "true" ]; then args+=(--include-nits); fi
             if [ -n "${TRIGGER_ID:-}" ]; then args+=(--trigger-id "$TRIGGER_ID"); fi
           fi
           set +e
