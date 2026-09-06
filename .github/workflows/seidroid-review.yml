@@ -1766,6 +1766,12 @@ jobs:
           # same way. The walk covers only the files the findings name, so its size is
           # the finding count and not the diff's.
           #
+          # Three groups, because a file the API sends without a patch -- a binary one,
+          # or one whose diff was too large to send -- has unknown lines rather than no
+          # lines. Counting it as no lines would tell an author their cited line is
+          # outside the diff when it is in it. Those findings stay out of the batch and
+          # go to the API one at a time, which is the only thing that can still say.
+          #
           # Read ahead of the call because the call is all-or-nothing: one line the API
           # refuses loses every comment with it, so a refusal has to be predicted here
           # rather than met there.
@@ -1784,10 +1790,15 @@ jobs:
               | {RIGHT: .R, LEFT: .L};
             (reduce $findings[0][] as $f ({}; .[$f.file] = true)) as $wanted
             | ([ .[] | select($wanted[.filename // ""] // false)
-                     | {key: .filename, value: hunks} ] | from_entries) as $index
-            | ($findings[0] | map(. + {ok: (($index[.file][.side][.line | tostring]) // false)}))
-            | { anchored: [ .[] | select(.ok) | del(.ok) ],
-                loose: [ .[] | select(.ok | not) | del(.ok) ] }'
+                     | {key: .filename,
+                        value: (if has("patch") then hunks else null end)} ] | from_entries) as $index
+            | ($findings[0]
+               | map(. as $g | ($index[$g.file]) as $h
+                     | . + { ok: (($h[$g.side][$g.line | tostring]) // false),
+                             unknown: (($index | has($g.file)) and ($h == null)) }))
+            | { anchored: [ .[] | select(.ok) | del(.ok, .unknown) ],
+                unknown: [ .[] | select(.ok | not) | select(.unknown) | del(.ok, .unknown) ],
+                loose: [ .[] | select(.ok | not) | select(.unknown | not) | del(.ok, .unknown) ] }'
           files="$RUNNER_TEMP/review-pr-files.json"
           placement="$RUNNER_TEMP/review-placement.json"
           # The diff at the commit this review read, which is the commit every comment
@@ -1852,16 +1863,21 @@ jobs:
               # posts the review twice -- so those findings take the summary, where
               # the reader still gets every one of them.
               #
-              # The code comes from GitHub's error object on stdout, which is where
-              # gh leaves it, and this is the endpoint the position step below reads
-              # a 422 from the same way. An absent code reads as "not 422" and takes
-              # the summary: a shape this cannot read costs the placement, never a
-              # duplicate.
-              if gh api -X POST "repos/$REPO/pulls/$PR/reviews" --input "$request" > "$response"; then
+              # The code comes from the response's own status line, which -i puts
+              # first, and not from a status field in the error body. GitHub's
+              # validation-error schema declares no such field, and a 422 that
+              # carries none would read as "not 422" and send every anchorable
+              # finding to the summary -- worse than placing each one by hand, which
+              # is what this rung is for.
+              #
+              # A call that reached no response leaves no status line, and an empty
+              # code takes the summary. That is the case where the write may have
+              # landed, so it is the case that must not be repeated.
+              if gh api -i -X POST "repos/$REPO/pulls/$PR/reviews" --input "$request" > "$response"; then
                 on_line=$((on_line + anchored))
                 echo "posted one review carrying $anchored comment(s) on $REPO#$PR"
               else
-                status="$(jq -r '.status // empty' "$response" 2>/dev/null || true)"
+                status="$(sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' "$response" || true)"
                 if [ "$status" = "422" ]; then
                   echo "::warning::$REPO#$PR refused the review carrying $anchored comment(s); each finding is posted on its own instead"
                   place_each place_one to_summary_ondiff < <(rows '.anchored[]' "$placement")
@@ -1871,6 +1887,7 @@ jobs:
                 fi
               fi
             fi
+            place_each place_one to_summary < <(rows '.unknown[]' "$placement")
             place_each on_file_or_summary to_summary < <(rows '.loose[]' "$placement")
           else
             place_each place_one to_summary < <(rows '.[]' "$normal")
