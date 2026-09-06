@@ -1244,9 +1244,10 @@ jobs:
         # The condition names the same three facts its siblings name: a review turn,
         # not cancelled, and a verdict to report. A close produces no verdict, so a
         # request to tear a session down earns no answer.
+        # No verdict_produced gate: a re-run replays the trigger comment id, so a run
+        # reaching no verdict still has to clear a thumb an earlier attempt left there.
         if: ${{ inputs.mode == 'review' && !cancelled()
-          && needs.guard.outputs.comment_id != ''
-          && steps.drive.outputs.verdict_produced == 'true' }}
+          && needs.guard.outputs.comment_id != '' }}
         continue-on-error: true
         shell: bash
         env:
@@ -1258,13 +1259,15 @@ jobs:
           CHECK: ${{ steps.drive.outputs.check_path }}
         run: |
           set -euo pipefail
-          if [ ! -s "$CHECK" ]; then
-            echo "no conclusion to answer with"
-            exit 0
+          # An absent check file reads as an absent conclusion, which the case below
+          # answers by clearing. Returning here leaves an earlier attempt's thumb
+          # standing for a run that reached no verdict.
+          conclusion=""
+          if [ -s "$CHECK" ]; then
+            # jq's error goes to the log and the value comes back on stdout, so a check
+            # file this step cannot read states itself rather than arriving as data.
+            conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
           fi
-          # jq's error goes to the log and the value comes back on stdout, so a check
-          # file this step cannot read states itself rather than arriving as data.
-          conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
 
           # On the conclusion, not on the position the step above records: a repository
           # that has not opted into approve-on-success records none for a clean review,
