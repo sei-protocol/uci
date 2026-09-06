@@ -13,7 +13,8 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
 # wires that trigger and passes `mode: review`. A MANUAL one runs when a person
 # comments `@seidroid review`. Both spend model quota and hold a sandbox, so both are
-# gated -- see the guard below: the automatic path refuses a draft and honours the
+# gated -- see the guard below: the automatic path reviews a pull request once
+# unless the caller sets `re-review-on-push`, refuses a draft and honours the
 # skip-review label, and the manual path additionally checks who is asking.
 #
 # This file is the automation of record. It REPLACES `ai-review.yml` rather than
@@ -127,6 +128,25 @@ on:
         required: false
         type: string
         default: 'ai: skip-review'
+      re-review-on-push:
+        description: >-
+          Review again on every push to a pull request this workflow has already
+          reviewed. Off by default: one automatic review per pull request, and a
+          person asks for the next one by name.
+
+          Each review holds a managed sandbox for up to `timeout-minutes` and
+          spends model quota, so a pull request pushed to ten times costs ten of
+          each. It also posts ten verdicts.
+
+          A push is the only event it covers. Reopening a pull request or
+          relabelling it changes no code, so neither earns a second review
+          whatever this says.
+
+          It governs the automatic path alone. An explicit `@seidroid review`
+          comment is answered however many reviews have already run.
+        required: false
+        type: boolean
+        default: false
       guidelines-file:
         description: >-
           The repository's own review standards, read from the base branch and
@@ -315,7 +335,13 @@ jobs:
     # Set at all because the account default is six hours. The guard only reads
     # API state, so a minute is generous.
     timeout-minutes: 5
-    permissions: {}
+    # Read-only, and only what the once-per-PR gate below reads: the comments on
+    # the pull request, to find a verdict this workflow already posted. The gate
+    # prefers the App identity and falls back to this, so a caller that
+    # configures no App still gets one review per pull request rather than one
+    # per push.
+    permissions:
+      pull-requests: read
     # Runs for an automatic pull_request review, and for any comment-triggered
     # dispatch, review or close. For a comment it decides whether the commenter may
     # command this workflow at all; for an automatic review it decides whether the
@@ -463,6 +489,18 @@ jobs:
           COMMAND: ${{ steps.parse.outputs.command }}
           EVENT_NAME: ${{ github.event_name }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
+          ACTION: ${{ github.event.action }}
+          RE_REVIEW_ON_PUSH: ${{ inputs.re-review-on-push }}
+          # The App identity where a caller configured one, this workflow's own
+          # token where it did not. Named apart from GH_TOKEN above because the
+          # team check has no such fallback: reading an organisation's teams
+          # needs an identity that can see them, and GITHUB_TOKEN cannot, where
+          # reading the comments below needs no more than pull-requests: read.
+          GATE_TOKEN: ${{ steps.identity.outputs.token || github.token }}
+          # Opens every verdict this workflow posts. It has to match the marker
+          # the posting step writes; changing one alone makes every reviewed
+          # pull request read as unreviewed.
+          VERDICT_MARKER: "<!-- seidroid-review -->"
         run: |
           set -uo pipefail
           deny() { echo "::notice::$1"; echo "admit=false" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -520,6 +558,53 @@ jobs:
               fi
             elif [ "$APP_ID_PRESENT" = "true" ] || [ "$APP_KEY_PRESENT" = "true" ]; then
               deny "half of the App credential is set, so $SKIP_LABEL cannot be read on $REPO#$PR; not reviewing. Pass both secrets, or unset the half that is set"
+            fi
+          fi
+
+          # One automatic review per pull request. The verdict comment is the
+          # record that one already ran: this workflow posts one for every review
+          # that reaches a verdict, it hangs on the pull request rather than on a
+          # commit, and a push does not remove it. The review check run is keyed
+          # on the head commit, so a push leaves none behind and every push would
+          # read as a first review.
+          #
+          # The comment path never reaches this. A person who asks for a review by
+          # name is answered, however many have already run.
+          #
+          # Last of the checks, and the only one that pages the API.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            re_review=false
+            if [ "$ACTION" = "synchronize" ] && [ "$RE_REVIEW_ON_PUSH" = "true" ]; then
+              re_review=true
+            fi
+            if [ "$re_review" = "false" ]; then
+              # The author is tested by type rather than by login: the verdict
+              # posts under the App identity where a caller configured one and
+              # under this workflow's own where it did not. The marker must open
+              # the body. A person quoting it is not a Bot, and a bot that
+              # mentions it does not open with it, so neither reads as a verdict.
+              #
+              # It fails open, the way the label check above does. A read that
+              # fails costs one extra review, and the next push corrects it. A
+              # refusal on a signal this step could not read costs the review
+              # itself, on a pull request whose author never learns it was
+              # refused.
+              #
+              # A full page at a time: the pull request this gate matters most
+              # on is the one pushed to ten times, which is also the one carrying
+              # the most comments to page through. The page size rides in the
+              # path because `-F` on a `gh api` that names no `-X` makes the
+              # request a POST, and this one only ever reads.
+              # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+              if prior="$(GH_TOKEN="$GATE_TOKEN" \
+                   gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+                   --jq '.[] | select(.user.type == "Bot" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')"; then
+                if [ -n "$prior" ]; then
+                  deny "$REPO#$PR already carries a verdict from this workflow and re-review-on-push is off; comment @seidroid review to ask for another"
+                fi
+              else
+                echo "::warning::could not read the comments on $REPO#$PR, so a review that already ran cannot be found; this one proceeds"
+              fi
             fi
           fi
 
