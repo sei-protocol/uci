@@ -864,6 +864,11 @@ jobs:
           else
             echo "verdict_produced=false" >> "$GITHUB_OUTPUT"
             echo "::error::review produced no verdict (exit $rc)"
+            # A review that produced nothing fails the job, whatever the driver
+            # exited. An annotation on a green job is a review nobody knows did not
+            # happen, and every step that reports one runs on !cancelled() rather
+            # than on success. 5 is the driver's own code for this.
+            if [ "$rc" -eq 0 ]; then rc=5; fi
           fi
           exit "$rc"
 
@@ -1596,9 +1601,10 @@ jobs:
         # No byte-cap arithmetic, unlike the step above. What it appends is a bounded
         # summary the driver clipped, not the unbounded findings note.
         #
-        # continue-on-error, like its sibling. A no-verdict run has already failed the
-        # job at the drive step, so failing it again here buys no signal; the annotation
-        # in the run block is what replaces the one it costs.
+        # continue-on-error, like its sibling. The drive step already failed the job on
+        # this path -- it forces a non-zero exit when a review produced no verdict -- so
+        # failing it again here buys no signal; the annotation in the run block is what
+        # replaces the one it costs.
         if: ${{ inputs.mode == 'review' && !cancelled()
           && steps.drive.outputs.verdict_produced != 'true' }}
         continue-on-error: true
@@ -1608,7 +1614,7 @@ jobs:
           # Its own marker, following the same shape the inline findings use. The
           # verdict comment's marker means "this tool's verdict"; this comment reports
           # that there is none, so a later step or a reader's query can address one
-          # without matching the other.
+          # without matching the other. This step reads it back to find its own notice.
           MARKER: "<!-- seidroid-review:no-verdict -->"
           # Where the verdict comment would have gone.
           REPO: ${{ github.repository }}
@@ -1638,7 +1644,26 @@ jobs:
             '**This review did not complete.** It reached no verdict, so there is no review of this change to act on.' \
             "$reason" \
             "Read this run for the rest: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
-          if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
+          # One notice per pull request, updated in place. The verdict comment
+          # accumulates on purpose -- an author compares this review against the last
+          # one -- but a notice that the review did not complete carries no such
+          # history, and an outage on a caller wired to every push would leave one
+          # identical copy per push.
+          #
+          # Matched on the marker at the start of the body, and only on this tool's own
+          # comments, so a person quoting the marker cannot take the notice over. The
+          # read is guarded: a listing that fails leaves the id empty and this posts,
+          # which costs a duplicate notice rather than the notice itself.
+          # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
+          existing="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+            --jq '[.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.MARKER)) | .id] | last // empty' \
+            2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            if gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null; then
+              echo "updated the no-verdict notice on $REPO#$PR"
+              exit 0
+            fi
+          elif gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
             echo "reported a no-verdict review on $REPO#$PR"
             exit 0
           fi
