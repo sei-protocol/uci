@@ -274,10 +274,14 @@ on:
         description: >-
           seidroid GitHub App id. Optional: without it the review posts as the
           workflow's own identity, which is correct but reads as github-actions rather
-          than the bot. That identity also may not clear a block the App left, so a
-          repository that removes this credential after the App has recorded
-          CHANGES_REQUESTED can leave every later clean run failing on the dismissal
-          it cannot perform. Dismiss those reviews by hand when you remove it.
+          than the bot.
+
+          Changing it changes who withdraws a block. A protected branch that restricts
+          who may dismiss a review takes the dismissal only from a repository admin or
+          an actor on that list, whoever recorded the review. So put whichever identity
+          this workflow runs under on the list, and dismiss any standing block by hand
+          when you change the credential -- otherwise a later clean run fails on a
+          dismissal the API refuses.
         required: false
       SEIDROID_APP_PRIVATE_KEY:
         description: "seidroid GitHub App private key, exchanged for an installation token scoped to the calling repository. Never written to an output; the action masks it."
@@ -447,6 +451,11 @@ jobs:
           GH_TOKEN: ${{ steps.identity.outputs.token }}
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
           SKIP_LABEL: ${{ inputs.skip-review-label }}
+          # Which halves of the App credential the caller set. The label check below
+          # reads them to tell a caller that configured no App from one that
+          # configured half of it; the two deserve different answers.
+          APP_ID_PRESENT: ${{ secrets.SEIDROID_APP_ID != '' }}
+          APP_KEY_PRESENT: ${{ secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
           ACTOR: ${{ github.event.comment.user.login }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.parse.outputs.pr_number }}
@@ -498,9 +507,19 @@ jobs:
           # ...and it stops a REVIEW, not a teardown. A pull request that gains the
           # label after a session exists must still be able to reclaim its sandbox,
           # and nothing else will: no lifetime cap, no sweep.
-          if [ "$COMMAND" != "close" ] && [ -n "$SKIP_LABEL" ] && [ -n "${GH_TOKEN:-}" ]; then
-            if gh api "repos/$REPO/pulls/$PR" --jq '.labels[].name' 2>/dev/null                  | grep -qxF "$SKIP_LABEL"; then
-              deny "$REPO#$PR carries $SKIP_LABEL; not reviewing"
+          #
+          # It fails open for a caller that configured no App, and CLOSED for one that
+          # configured half of one. Half a credential mints no token, so the label
+          # cannot be read -- and a caller who set either secret meant to have the
+          # identity that reads it. Failing open there would review a pull request
+          # carrying the label, on the one configuration that cannot notice.
+          if [ "$COMMAND" != "close" ] && [ -n "$SKIP_LABEL" ]; then
+            if [ -n "${GH_TOKEN:-}" ]; then
+              if gh api "repos/$REPO/pulls/$PR" --jq '.labels[].name' 2>/dev/null                  | grep -qxF "$SKIP_LABEL"; then
+                deny "$REPO#$PR carries $SKIP_LABEL; not reviewing"
+              fi
+            elif [ "$APP_ID_PRESENT" = "true" ] || [ "$APP_KEY_PRESENT" = "true" ]; then
+              deny "half of the App credential is set, so $SKIP_LABEL cannot be read on $REPO#$PR; not reviewing. Pass both secrets, or unset the half that is set"
             fi
           fi
 
@@ -1312,19 +1331,32 @@ jobs:
           # A 422 also covers a stale commit_id, which the rung retries with the same
           # commit_id and meets identically. That costs one call and no review.
           #
-          # The API's own error still reaches stderr, where it says why.
+          # The code comes from GitHub's error object, not from gh's message. gh writes
+          # the response to stdout and its own line to stderr, so a failed call leaves
+          # the error object in `body` -- and `status` on it is the code. gh's line is
+          # a human string outside its compatibility surface, and a reformat there
+          # would turn this rung into a silent no-op.
+          #
+          # `status` is documented on GitHub's Basic Error schema and measured on this
+          # endpoint's 422, but the 422's own schema does not declare it. So it can be
+          # absent, and an absent code returns 1: no rung, no downgrade. The vote
+          # survives a shape this cannot read, which is the same direction the 422 rule
+          # chooses above.
+          #
+          # gh's own line still reaches the log, where it says why.
           post_position() {
-            local args err rc
+            local args body status
             args=(-X POST "repos/$REPO/pulls/$PR/reviews"
                   -f event="$1" -f body="$MARKER"$'\n'"$note")
             if [ -n "$head_sha" ]; then
               args+=(-f commit_id="$head_sha")
             fi
-            err="$(gh api "${args[@]}" 2>&1 >/dev/null)" && return 0
-            rc=1
-            case "$err" in (*"HTTP 422"*) rc=2 ;; esac
-            printf '%s\n' "$err" >&2
-            return "$rc"
+            body="$(gh api "${args[@]}")" && return 0
+            status="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
+            if [ "$status" = "422" ]; then
+              return 2
+            fi
+            return 1
           }
 
           if [ -n "$event" ]; then
@@ -1431,7 +1463,7 @@ jobs:
               echo "withdrew review $id"
             else
               stuck=$((stuck+1))
-              echo "::error::could not withdraw review $id on $REPO#$PR; it still blocks the merge on a finding this run did not reproduce. This run may not hold the identity that recorded it: removing SEIDROID_APP_ID leaves the App's blocks behind. Dismiss review $id by hand to clear it"
+              echo "::error::could not withdraw review $id on $REPO#$PR; it still blocks the merge on a finding this run did not reproduce. On a protected branch the API takes a dismissal only from a repository admin or an actor named in the branch's dismissal restriction, so check that this run's identity is one of them. A token without pull-requests: write is refused as well. Dismiss review $id by hand to clear it"
             fi
           done <<< "$ids"
           echo "superseded blocks: $withdrawn withdrawn, $stuck still standing"
