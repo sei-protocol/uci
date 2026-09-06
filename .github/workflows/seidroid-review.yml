@@ -524,6 +524,32 @@ jobs:
             exit 1
           fi
 
+      # Half a credential mints nothing, and the review runs under the workflow's own
+      # identity instead of failing. That is the better outcome and a silent one, so
+      # this says it out loud. Not fatal: the App is optional, and a review under
+      # github-actions is a review.
+      #
+      # Either half alone, not just a missing key. A diagnostic with a blind spot
+      # sends the reader looking at the half that is already set.
+      #
+      # Step-level env, like the check above. A step `if` cannot read `secrets`; a
+      # step `env` can.
+      - name: Report a half-configured reviewer identity
+        if: steps.parse.outputs.should_run == 'true'
+        env:
+          APP_ID_PRESENT: ${{ secrets.SEIDROID_APP_ID != '' }}
+          APP_KEY_PRESENT: ${{ secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
+        run: |
+          missing=""
+          if [ "$APP_ID_PRESENT" = "true" ] && [ "$APP_KEY_PRESENT" != "true" ]; then
+            missing=SEIDROID_APP_PRIVATE_KEY
+          elif [ "$APP_KEY_PRESENT" = "true" ] && [ "$APP_ID_PRESENT" != "true" ]; then
+            missing=SEIDROID_APP_ID
+          fi
+          if [ -n "$missing" ]; then
+            echo "::warning::$missing is not set beside the other half of the App credential, so this review posts as github-actions[bot] rather than as the App. Pass both secrets for the App identity, or unset the half that is set"
+          fi
+
   review:
     name: Review
     needs: guard
@@ -1405,7 +1431,7 @@ jobs:
               echo "withdrew review $id"
             else
               stuck=$((stuck+1))
-              echo "::error::could not withdraw review $id on $REPO#$PR; it still blocks the merge on a finding this run did not reproduce"
+              echo "::error::could not withdraw review $id on $REPO#$PR; it still blocks the merge on a finding this run did not reproduce. This run may not hold the identity that recorded it: removing SEIDROID_APP_ID leaves the App's blocks behind. Dismiss review $id by hand to clear it"
             fi
           done <<< "$ids"
           echo "superseded blocks: $withdrawn withdrawn, $stuck still standing"
