@@ -257,7 +257,7 @@ on:
         description: "seidroid GitHub App id. Optional: without it the review posts as the workflow's own identity, which is correct but reads as github-actions rather than the bot."
         required: false
       SEIDROID_APP_PRIVATE_KEY:
-        description: "seidroid GitHub App private key, exchanged for an installation token scoped to the reviewed repository. Never written to an output; the action masks it."
+        description: "seidroid GitHub App private key, exchanged for an installation token scoped to the calling repository. Never written to an output; the action masks it."
         required: false
 
 permissions: {}
@@ -306,9 +306,6 @@ jobs:
       should_run: ${{ steps.parse.outputs.should_run == 'true' && steps.admit.outputs.admit == 'true' }}
       pr_number: ${{ steps.parse.outputs.pr_number }}
       comment_id: ${{ steps.parse.outputs.comment_id }}
-      review_repo: ${{ steps.parse.outputs.review_repo }}
-      review_repo_name: ${{ steps.parse.outputs.review_repo_name }}
-      review_pr: ${{ steps.parse.outputs.review_pr }}
     steps:
       - id: parse
         # Every GitHub-supplied value (the comment body, the PR number, the
@@ -319,7 +316,6 @@ jobs:
         # there is one pattern to audit, not one safe-looking exception.
         env:
           BODY: ${{ github.event.comment.body }}
-          REPO_OWNER: ${{ github.repository_owner }}
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
           EVENT_NAME: ${{ github.event_name }}
@@ -329,9 +325,6 @@ jobs:
           # the job condition above has already established which event this is. It
           # reports the same outputs the command grammar below produces, so every
           # later step reads one shape and no step needs a second code path.
-          #
-          # No target, deliberately. Reviewing ELSEWHERE is a thing a person asks for
-          # by naming it; an automatic run always reviews the pull request it fired on.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             {
               echo "should_run=true"
@@ -342,30 +335,46 @@ jobs:
             exit 0
           fi
           cmd="$(printf '%s' "$BODY" | tr -d '\r')"
-          # Require a LINE reading `@seidroid review`, optionally `close`, optionally
-          # followed by one `owner/name#number` naming a pull request ELSEWHERE.
-          # Anchoring to a whole line is what keeps a comment that merely quotes or
-          # discusses the command from triggering a review, and the target's shape
-          # is pinned tightly enough that nothing else can ride in on it.
+          # Require a LINE reading `@seidroid review`, optionally `close`, and nothing
+          # else on it. Anchoring to a whole line is what keeps a comment that merely
+          # quotes or discusses the command from triggering a review.
           #
           # The @ is optional so `@seidroid review` -- the documented form, and what
           # the mention actually notifies -- and a bare `seidroid review` both work.
           # Whole-line anchoring is what keeps that safe: a comment discussing the
           # command has other words on the line and does not match.
-          #
-          # The target exists because the two credentials in play cover different
-          # repositories. This workflow posts with the caller's GITHUB_TOKEN, so it
-          # can only comment here; the agent reads with its own App installation,
-          # so it can only review where that App is installed. Where those sets do
-          # not overlap, the only way to exercise a real review is to ask here and
-          # read there.
-          # A segment cannot begin with a dot, which is what GitHub allows and what
-          # makes the claim above true: the looser form matched `..`, so `../..#1`
-          # parsed as a target and flowed into an api path as a dot segment.
-          target_re='[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*#[0-9]+'
           cmdline="$(printf '%s\n' "$cmd" \
-            | grep -m1 -E "^[[:space:]]*@?seidroid[[:space:]]+review([[:space:]]+close)?([[:space:]]+${target_re})?[[:space:]]*$" || true)"
+            | grep -m1 -E '^[[:space:]]*@?seidroid[[:space:]]+review([[:space:]]+close)?[[:space:]]*$' || true)"
           if [ -z "$cmdline" ]; then
+            # A review runs only on the repository the pull request is on, so a
+            # request that names a repository is named in this run's log. That is all
+            # this does: an issue_comment run attaches to no pull request, so the
+            # annotation reaches whoever opens the run and nobody else, and
+            # ai-assistant.yml still answers the body conversationally, because its
+            # reservation is the bare command alone. Both match ai-review, where the
+            # target form was never a review command either.
+            #
+            # It earns its line by naming the reason in the one place a person
+            # debugging "why did my request do nothing" will look.
+            #
+            # notice, not error, because a denied request is a notice throughout
+            # ai-review: an unauthorised actor, an unlisted bot, a draft and an empty
+            # team all deny at that level. error there is reserved for a caller that
+            # wired the workflow wrongly.
+            #
+            # Matched on the same whole-line anchor the command grammar above uses,
+            # so the refusal covers exactly the shapes that fall through it.
+            #
+            # Captured, and tested for emptiness, rather than read from a `grep -q`
+            # exit status. -q stops at the first match, which leaves printf writing
+            # into a closed pipe on a body larger than the pipe buffer; pipefail then
+            # reads the SIGPIPE as a failed pipeline and the refusal is not written.
+            # Measured: at 232 kB the -q form reports status 141 and stays silent.
+            named_repo="$(printf '%s\n' "$cmd" \
+              | grep -m1 -E '^[[:space:]]*@?seidroid[[:space:]]+review([[:space:]]+close)?[[:space:]]+[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*#[0-9]+[[:space:]]*$' || true)"
+            if [ -n "$named_repo" ]; then
+              echo "::notice::seidroid review takes no repository target; a review runs only on the repository the pull request is on"
+            fi
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -375,45 +384,14 @@ jobs:
           # passes the mode, but the guard has to know too: a close is teardown, and
           # some checks below stop a review without having any business stopping a
           # reclaim.
-          # Anchored on the word the grammar accepts, immediately after `review`, not
-          # a substring of the line: a target whose owner or repository contains
-          # "close" -- owner/closed-loop#12 -- is a review, and a glob called it
-          # teardown.
+          # Anchored on the word the grammar accepts, immediately after `review`,
+          # rather than found anywhere on the line, so nothing that merely contains
+          # "close" is read as teardown.
           if printf '%s' "$cmdline" \
             | grep -qE '^[[:space:]]*@?seidroid[[:space:]]+review[[:space:]]+close([[:space:]]|$)'; then
             echo "command=close" >> "$GITHUB_OUTPUT"
           else
             echo "command=review" >> "$GITHUB_OUTPUT"
-          fi
-          # Re-extracted from the matched line rather than from the raw body, so
-          # what is passed on is only ever a substring the anchored pattern
-          # already accepted.
-          target="$(printf '%s' "$cmdline" | grep -oE "$target_re" || true)"
-          if [ -n "$target" ]; then
-            repo="${target%%#*}"
-            # Same owner only, and refused here so the refusal says what is wrong.
-            # The reviewing App is installed per owner and the mint takes the owner
-            # separately from the repository, so a foreign owner either fails the
-            # mint with an opaque error or -- where a same-named repo exists under
-            # this owner -- mints for the WRONG repository and every later call 404s.
-            #
-            # The target exists for a different repository under the same owner,
-            # which is the case the two credentials actually create. Un-defer when
-            # the App is installed somewhere else and a review there is wanted: the
-            # fix is to derive the mint's owner from this value, not to drop the
-            # check.
-            if [ "${repo%%/*}" != "$REPO_OWNER" ]; then
-              echo "::error::review target $repo is under a different owner; \
-                only repositories under $REPO_OWNER can be reviewed from here"
-              echo "should_run=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "review_repo=$repo" >> "$GITHUB_OUTPUT"
-            # The bare name as well: an app-token mint names repositories without
-            # their owner, which it takes separately.
-            echo "review_repo_name=${repo##*/}" >> "$GITHUB_OUTPUT"
-            echo "review_pr=${target##*#}" >> "$GITHUB_OUTPUT"
-            echo "::notice::reviewing $target and reporting back on this pull request"
           fi
           # The comment id is passed as --trigger-id, which only labels this
           # dispatch in the logs. The pull request, not the comment, is the
@@ -431,7 +409,9 @@ jobs:
           app-id: ${{ secrets.SEIDROID_APP_ID }}
           private-key: ${{ secrets.SEIDROID_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: ${{ steps.parse.outputs.review_repo_name || github.event.repository.name }}
+          # Both keys, together. `owner` on its own mints a token that reaches every
+          # repository the installation is on; `repositories` holds it to this one.
+          repositories: ${{ github.event.repository.name }}
 
       - name: Admit the request
         id: admit
@@ -440,8 +420,8 @@ jobs:
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
           SKIP_LABEL: ${{ inputs.skip-review-label }}
           ACTOR: ${{ github.event.comment.user.login }}
-          REPO: ${{ steps.parse.outputs.review_repo || github.repository }}
-          PR: ${{ steps.parse.outputs.review_pr || steps.parse.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.parse.outputs.pr_number }}
           PARSED: ${{ steps.parse.outputs.should_run }}
           COMMAND: ${{ steps.parse.outputs.command }}
           EVENT_NAME: ${{ github.event_name }}
@@ -557,11 +537,13 @@ jobs:
       # a just-closed pull request cancels the in-flight close -- and close is the
       # only thing that reclaims a sandbox.
       #
-      # Keyed on the REVIEWED pull request, not the asking one, because that is what
-      # the session is keyed on: two pull requests here both naming owner/name#9
-      # would otherwise drive one target session at once.
+      # The event's own number is the third term's fallback, and it is load-bearing:
+      # a close arriving as a pull_request event skips the guard, so the guard's
+      # number is empty there. Without it every reclaim run shares one group, and
+      # two closes for different pull requests cancel each other -- while close is
+      # the only thing that reclaims a sandbox.
       group: >-
-        seidroid-review-${{ inputs.mode }}-${{ needs.guard.outputs.review_repo || github.repository }}-${{ needs.guard.outputs.review_pr || needs.guard.outputs.pr_number || github.event.pull_request.number }}
+        seidroid-review-${{ inputs.mode }}-${{ github.repository }}-${{ needs.guard.outputs.pr_number || github.event.pull_request.number }}
       cancel-in-progress: true
     # The reviewed repo's runner label, GitHub-hosted by default. The default pairs
     # with the https base URL: the mint refuses to send the client secret over plain
@@ -669,14 +651,11 @@ jobs:
 
       - name: Mint the reviewing identity
         # A review is the bot's work, and the identity on it is what a reader
-        # trusts. Scoped to the REVIEWED repository rather than this one, which is
-        # also what lets a review triggered from elsewhere comment where the code
-        # actually lives.
+        # trusts, so the posting steps below prefer this token to the workflow's own.
         #
         # Optional on purpose. Without the app credentials every step below falls
-        # back to the workflow's own token, which cannot leave this repository --
-        # correct, just attributed to github-actions and unable to place inline
-        # comments on another repository's pull request.
+        # back to the workflow's own token -- correct, just attributed to
+        # github-actions rather than to the bot.
         id: identity
         # Minted before the review rather than after it: the step below reads the
         # threads this reviewer left last time, and that read needs the same identity
@@ -690,7 +669,8 @@ jobs:
           app-id: ${{ secrets.SEIDROID_APP_ID }}
           private-key: ${{ secrets.SEIDROID_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: ${{ needs.guard.outputs.review_repo_name || github.event.repository.name }}
+          # Both keys, together, for the reason the guard's mint states.
+          repositories: ${{ github.event.repository.name }}
 
       - name: Read the threads this review left before
         id: threads
@@ -709,8 +689,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
-          REPO: ${{ needs.guard.outputs.review_repo || github.repository }}
-          PR: ${{ needs.guard.outputs.review_pr || needs.guard.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
           THREADS: ${{ runner.temp }}/review-prior-threads.json
         run: |
           set -euo pipefail
@@ -752,16 +732,16 @@ jobs:
         if: ${{ inputs.mode == 'review' && !cancelled() }}
         # Tolerated, because this is a step that improves publishing and must not be
         # able to prevent reviewing. Failing it hard would let a transient api error
-        # -- or a cross-repository target with no App identity -- abort a review
-        # that would otherwise have run, since the drive step that follows carries no
-        # condition of its own. No publisher below reads the head for itself. Each
-        # one states what it cannot do when this step produces nothing.
+        # abort a review that would otherwise have run, since the drive step that
+        # follows carries no condition of its own. No publisher below reads the head
+        # for itself. Each one states what it cannot do when this step produces
+        # nothing.
         continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
-          REPO: ${{ needs.guard.outputs.review_repo || github.repository }}
-          PR: ${{ needs.guard.outputs.review_pr || needs.guard.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
         run: |
           set -euo pipefail
           # Resolved once, here, and read from this output by every publisher below.
@@ -789,14 +769,11 @@ jobs:
           SEIDROID_ALLOW_POLICIES: ${{ inputs.allow-policies }}
           SEIDROID_ALLOW_TOOLS: ${{ inputs.allow-tools }}
           MODE: ${{ inputs.mode }}
-          # The reviewed pull request, which is this repository's unless the
-          # trigger named another. The session is keyed on this pair, so a
-          # cross-repository review adopts the target's conversation rather than
-          # opening a second one under the asking repository's name.
-          REPO: ${{ needs.guard.outputs.review_repo || github.repository }}
+          # The reviewed pull request. The driver keys the session on this pair.
+          REPO: ${{ github.repository }}
           # The guard supplies this for a review; a close event carries its own
           # number and skips the guard entirely.
-          PR: ${{ needs.guard.outputs.review_pr || needs.guard.outputs.pr_number || github.event.pull_request.number }}
+          PR: ${{ needs.guard.outputs.pr_number || github.event.pull_request.number }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
           # The findings this reviewer left before, so it drops what the author has
           # addressed and keeps what the diff still shows. No token rides with it:
@@ -879,11 +856,6 @@ jobs:
 
       - name: Place findings on the code
         id: place
-        # Inline comments go on the REVIEWED pull request, which is the one that
-        # contains the lines. That makes this step conditional in a way the
-        # summary is not: a cross-repository review has nowhere to place them,
-        # because the token below only reaches this repository.
-        #
         # Placement degrades in two steps rather than dropping a finding. The API
         # accepts a line only where the diff covers it, and a review that reads the
         # files around the diff -- which the prompt asks for, because a change can
@@ -893,16 +865,13 @@ jobs:
         # So the cost of a review that sees past the hunks is paid in placement,
         # not in lost findings.
         if: ${{ inputs.mode == 'review' && !cancelled()
-          && steps.drive.outputs.verdict_produced == 'true'
-          && (steps.identity.outputs.token != ''
-              || needs.guard.outputs.review_repo == ''
-              || needs.guard.outputs.review_repo == github.repository) }}
+          && steps.drive.outputs.verdict_produced == 'true' }}
         continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
-          REPO: ${{ needs.guard.outputs.review_repo || github.repository }}
-          PR: ${{ needs.guard.outputs.review_pr || needs.guard.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           FINDINGS: ${{ steps.drive.outputs.findings_path }}
           # Marks every inline comment as this tool's, so a reader can tell an
@@ -1015,8 +984,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
-          REPO: ${{ needs.guard.outputs.review_repo || github.repository }}
-          PR: ${{ needs.guard.outputs.review_pr || needs.guard.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           CHECK: ${{ steps.drive.outputs.check_path }}
         run: |
@@ -1068,8 +1037,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token }}
-          REPO: ${{ needs.guard.outputs.review_repo || github.repository }}
-          PR: ${{ needs.guard.outputs.review_pr || needs.guard.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           CHECK: ${{ steps.drive.outputs.check_path }}
           APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
@@ -1251,9 +1220,9 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
-          # The ASKING repository. A targeted request names the reviewed pull request
-          # elsewhere; the comment stays where it was written.
           GH_TOKEN: ${{ github.token }}
+          # The repository the request was written on, which is the one the review
+          # ran on.
           TRIGGER_REPO: ${{ github.repository }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
           CHECK: ${{ steps.drive.outputs.check_path }}
@@ -1355,22 +1324,19 @@ jobs:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
           MARKER: "<!-- seidroid-review -->"
           # The reviewed pull request, which is where a reader looks for a review.
-          # Reachable because the identity above is minted for that repository; the
-          # fallback token is not, so without the app credentials a cross-repository
-          # review reports back where it was asked for instead.
-          REPO: ${{ steps.identity.outputs.token != '' && (needs.guard.outputs.review_repo || github.repository) || github.repository }}
-          PR: ${{ steps.identity.outputs.token != '' && (needs.guard.outputs.review_pr || needs.guard.outputs.pr_number) || needs.guard.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
           VERDICT: ${{ steps.drive.outputs.verdict_path }}
           # Findings the step above could place nowhere on the diff. Empty when it
-          # placed them all, and when it was skipped for a cross-repository review.
+          # placed them all.
           NOTE: ${{ steps.place.outputs.note_path }}
           # What the driver counted, for the findings line below. Read rather than
           # recomputed here: the driver derived the check run's conclusion from these
           # same findings, and a second derivation is a second thing that can disagree.
           CHECK: ${{ steps.drive.outputs.check_path }}
-          # What the step above placed. Empty, not zero, when that step was skipped for a
-          # cross-repository review or died partway -- and the difference is the point.
-          # "0 posted inline" over a placement that never ran is a lie about the review.
+          # What the step above placed. Empty, not zero, when that step died partway --
+          # and the difference is the point. "0 posted inline" over a placement that
+          # never ran is a lie about the review.
           ON_LINE: ${{ steps.place.outputs.on_line }}
           ON_FILE: ${{ steps.place.outputs.on_file }}
           UNPLACED: ${{ steps.place.outputs.unplaced }}
@@ -1454,7 +1420,7 @@ jobs:
           else
             add_term "inline placement did not run"
             echo "::notice::no placement counts, so the findings line says so; that step \
-              is skipped for a cross-repository review and writes nothing if it dies"
+              writes none of them if it dies partway"
           fi
 
           # Counted apart from both, and named. CheckConclusion excludes a pre-existing
