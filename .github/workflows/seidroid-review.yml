@@ -1152,11 +1152,19 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Name the identity this review posts under
-        # The login every step below compares a comment's author against, so a thread
+        # The logins every step below compares a comment's author against, so a thread
         # this tool wrote is told apart from one that merely quotes its marker. One
-        # value, for the reason FINDING_MARKER is one: two steps computing it from
-        # expressions of their own drift, and a drift here reads as a pull request this
-        # reviewer has never touched.
+        # place, for the reason FINDING_MARKER is one place: two steps computing them
+        # from expressions of their own drift, and a drift here reads as a pull request
+        # this reviewer has never touched.
+        #
+        # Two of them, because reading and mutating do not carry the same risk.
+        # REVIEWER_LOGIN is the identity this run uses and is the only one allowed to
+        # have written a thread this run closes. WORKFLOW_LOGIN is what a run without
+        # App credentials posts as, and the history read admits it too: a repository
+        # that has moved between the two would otherwise lose its whole history, and a
+        # review that re-reports every finding it already made and can close none of
+        # them is worse than one that simply closes none.
         #
         # It cannot ride in the job's env block. That is evaluated before any step runs
         # and the app slug is a step output, so this exports to $GITHUB_ENV instead and
@@ -1176,9 +1184,13 @@ jobs:
           APP_SLUG: ${{ steps.identity.outputs.app-slug }}
         run: |
           set -euo pipefail
-          login="github-actions[bot]"
+          # The identity a run without App credentials posts under. Written here rather
+          # than spelled again in each reader, so the two logins come from one place.
+          workflow_login="github-actions[bot]"
+          login="$workflow_login"
           if [ -n "${APP_SLUG:-}" ]; then login="${APP_SLUG}[bot]"; fi
           echo "REVIEWER_LOGIN=$login" >> "$GITHUB_ENV"
+          echo "WORKFLOW_LOGIN=$workflow_login" >> "$GITHUB_ENV"
           echo "this review reads and posts as $login"
 
       - name: Read the threads this review left before
@@ -1188,11 +1200,19 @@ jobs:
         # must perform is a step it can skip, and prose the author controls should
         # not travel through a shell to get here.
         #
-        # Its own threads only, on two tests. ai-review posts under the same bot
-        # identity, so the marker every inline comment carries tells the two apart; and
-        # the marker alone admits any thread whose first comment quotes it, which on a
-        # repository holding this file is any review comment that quotes this line. The
-        # author is the other half, and both have to hold.
+        # Its own threads only, on two tests, and both have to hold.
+        #
+        # The marker has to OPEN the body, not merely appear in it. Placement writes it
+        # as the first bytes, and every verdict-side reader in this file keys the same
+        # way. A contains test admits any comment that quotes the marker instead -- and
+        # ai-review posts under the same bot identity, so one of its inline comments
+        # quoting this file's FINDING_MARKER line, on the repository that defines it,
+        # would pass an author test as well and be read back as a finding this tool
+        # left.
+        #
+        # The author has to be one this tool posts as: this run's identity, or the
+        # workflow token's. Either, here, because reading is inert; the step that
+        # closes a thread takes this run's identity alone.
         #
         # The thread id travels with each one. It is minted here, when the comment
         # posts, and the driver's session has no way to learn it -- so this read is
@@ -1245,8 +1265,10 @@ jobs:
           # spliced into it.
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           jq '[ .data.repository.pullRequest.reviewThreads.nodes[]
-                | select((.comments.nodes[0].body // "") | contains($ENV.FINDING_MARKER))
-                | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)
+                | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
+                | select(.comments.nodes[0].author.login
+                         | . != null and . != ""
+                           and (. == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))
                 | { thread_id: (.id // ""),
                     file: (.path // ""),
                     line: (.line // .originalLine // 0),
@@ -1254,7 +1276,7 @@ jobs:
                     replies: [ .comments.nodes[1:][] | "\(.author.login // "someone"): \(.body)" ],
                     resolved: .isResolved } ]' "$THREADS.raw" > "$THREADS"
           carried="$(jq length "$THREADS")"
-          echo "carrying $carried prior finding(s) written by ${REVIEWER_LOGIN:-nobody this run could name} into this review"
+          echo "carrying $carried prior finding(s) written by ${REVIEWER_LOGIN:-nobody this run could name} or ${WORKFLOW_LOGIN:-nobody} into this review"
 
           # A marked thread that the login test drops is worth a line, because the two
           # ways to get here look identical from the outside: this reviewer has left
@@ -1263,10 +1285,10 @@ jobs:
           # history and its ability to close a single thread.
           # shellcheck disable=SC2016  # $ENV is jq's
           marked="$(jq '[ .data.repository.pullRequest.reviewThreads.nodes[]
-                          | select((.comments.nodes[0].body // "") | contains($ENV.FINDING_MARKER))
+                          | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
                         ] | length' "$THREADS.raw")"
           if [ "$marked" -gt 0 ] && [ "$carried" -eq 0 ]; then
-            echo "::warning::$marked thread(s) on $REPO#$PR carry this tool's marker and none was written by ${REVIEWER_LOGIN:-nobody this run could name}, so this review carries no history and can close no thread"
+            echo "::warning::$marked thread(s) on $REPO#$PR open with this tool's marker and none was written by ${REVIEWER_LOGIN:-nobody this run could name} or ${WORKFLOW_LOGIN:-nobody}, so this review carries no history and can close no thread"
           fi
 
       - name: Record the commit under review
@@ -2301,6 +2323,10 @@ jobs:
         # pull request and the ids come from model output, so the check runs beside the
         # call rather than only upstream of it.
         #
+        # REVIEWER_LOGIN alone, where the history read admits WORKFLOW_LOGIN beside it.
+        # Reading a thread this run did not write costs nothing; closing one is a
+        # mutation, and it stays as narrow as the identity performing it.
+        #
         # continue-on-error, like every publisher in this job. A review that ran and
         # published must not be failed over a thread it could not close: the cost of not
         # closing one is the duplicate this workflow leaves today.
@@ -2407,7 +2433,7 @@ jobs:
           # invented. `open` is the subset there is still something to do to.
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           own='.data.repository.pullRequest.reviewThreads.nodes[]
-                | select((.comments.nodes[0].body // "") | contains($ENV.FINDING_MARKER))
+                | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
                 | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)'
           ours="$(jq -r "$own | .id" "$state")"
           open="$(jq -r "$own | select(.isResolved | not) | .id" "$state")"
