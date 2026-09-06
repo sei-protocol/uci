@@ -1017,11 +1017,27 @@ jobs:
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           CHECK: ${{ steps.drive.outputs.check_path }}
+          # The one field this step will not read out of the artifact. See below.
+          VERDICT_PRODUCED: ${{ steps.drive.outputs.verdict_produced }}
         run: |
           set -euo pipefail
           if [ ! -s "$CHECK" ]; then
             echo "no check run to publish"
             exit 0
+          fi
+          # A run that produced no verdict publishes failure, whatever the file says.
+          # The file is written by a separate process across a repository boundary, so
+          # reading a passing conclusion out of it on a run this workflow already knows
+          # produced nothing would let one crash between two writes satisfy a required
+          # check. This step decides the one thing that gates a merge; it reads the
+          # artifact for everything else.
+          conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
+          if [ "${VERDICT_PRODUCED:-}" != "true" ]; then
+            conclusion="failure"
+          fi
+          if [ -z "$conclusion" ]; then
+            echo "::error::the check file on $REPO#$PR carries no conclusion, so there is nothing to publish as the merge gate"
+            exit 1
           fi
           # Against the commit the review read, recorded before it started and used
           # as recorded. A check on any other commit attaches this verdict to code the
@@ -1039,10 +1055,10 @@ jobs:
             -f name=review \
             -f head_sha="$head_sha" \
             -f status=completed \
-            -f conclusion="$(jq -r .conclusion "$CHECK")" \
-            -f output[title]="$(jq -r .title "$CHECK")" \
-            -f output[summary]="$(jq -r .summary "$CHECK")" >/dev/null
-          echo "published review check: $(jq -r .conclusion "$CHECK") — $(jq -r .title "$CHECK")"
+            -f conclusion="$conclusion" \
+            -f output[title]="$(jq -r '.title // "review"' "$CHECK")" \
+            -f output[summary]="$(jq -r '.summary // ""' "$CHECK")" >/dev/null
+          echo "published review check: $conclusion — $(jq -r '.title // "review"' "$CHECK")"
 
       - name: State the review's position on the pull request
         # The check run is the gate a merge reads; this is the one a person reads,
@@ -1264,13 +1280,22 @@ jobs:
           TRIGGER_REPO: ${{ github.repository }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
           CHECK: ${{ steps.drive.outputs.check_path }}
+          # Whether there is a verdict to react to. See the conclusion below.
+          VERDICT_PRODUCED: ${{ steps.drive.outputs.verdict_produced }}
         run: |
           set -euo pipefail
           # An absent check file reads as an absent conclusion, which the case below
           # answers by clearing. Returning here leaves the eyes standing, and a thumb an
           # earlier attempt left, for a run that reached no verdict.
+          #
+          # A run that produced no verdict is read as no conclusion, whatever the file
+          # holds. It holds `failure` there, and that is the same word a review carrying
+          # blockers concludes -- so reading it here would thumb down a run that reviewed
+          # nothing, which says the change is bad when nobody could read it. The title
+          # separates the two in the checks list; a reaction has no title, so this reads
+          # the gate the workflow already computed instead.
           conclusion=""
-          if [ -s "$CHECK" ]; then
+          if [ -s "$CHECK" ] && [ "${VERDICT_PRODUCED:-}" = "true" ]; then
             # jq's error goes to the log and the value comes back on stdout, so a check
             # file this step cannot read states itself rather than arriving as data.
             conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
@@ -1386,6 +1411,10 @@ jobs:
           # the review started; absent only when that read failed, and then the
           # annotation is the only record.
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
+          # The notice an earlier no-verdict run left, which this verdict supersedes.
+          # Its own name: MARKER above is this comment's, and one env block cannot
+          # carry two keys of one name.
+          NO_VERDICT_MARKER: "<!-- seidroid-review:no-verdict -->"
           # GitHub rejects an issue comment over 65,536 characters. The driver bounds
           # the verdict it writes and clips its own text to fit (review.MaxBodyBytes,
           # 60,000). Nothing bounds $NOTE: it carries Finding.Detail, raw model prose
@@ -1547,6 +1576,30 @@ jobs:
           fi
           if [ "$posted" = true ]; then
             echo "posted the verdict on $REPO#$PR"
+            # An earlier run may have left a notice saying this review did not complete.
+            # It did, so that notice now asserts a state that is not true and links a run
+            # that is not the latest. The check run supersedes itself on the new commit;
+            # a comment does not, so this withdraws it.
+            #
+            # Matched on the marker at the start of the body, and only on this tool's own
+            # comments, so a person quoting the marker cannot have their comment deleted.
+            # The listing emits one id per line: --paginate runs the filter once per page,
+            # so aggregating inside jq would emit one result per page and concatenate them
+            # into a string no comment carries.
+            #
+            # Every failure here is tolerated. The verdict is posted, and a stale notice
+            # beside it is a smaller cost than failing a step that already did its work.
+            # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
+            stale_notice="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+              --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.NO_VERDICT_MARKER)) | .id' \
+              2>/dev/null | tail -n 1 || true)"
+            if [ -n "$stale_notice" ]; then
+              if gh api -X DELETE "repos/$REPO/issues/comments/$stale_notice" >/dev/null 2>&1; then
+                echo "withdrew the no-verdict notice an earlier run left on $REPO#$PR"
+              else
+                echo "::warning::could not withdraw the no-verdict notice $stale_notice on $REPO#$PR; it now says this review did not complete, and it did"
+              fi
+            fi
             exit 0
           fi
 
@@ -1624,6 +1677,32 @@ jobs:
           CHECK: ${{ steps.drive.outputs.check_path }}
         run: |
           set -euo pipefail
+          # Removes the standing no-verdict notice, if there is one, so exactly one is
+          # ever on the pull request.
+          #
+          # Matched on the marker at the start of the body, and only on this tool's own
+          # comments, so a person quoting the marker cannot have their comment deleted.
+          # The listing emits one id per line: --paginate runs the filter once per page,
+          # so aggregating inside jq would emit one result per page and concatenate them
+          # into a string no comment carries.
+          #
+          # Every failure here is tolerated. Whichever caller runs this has something
+          # else to say afterwards, and a stale notice is a smaller cost than losing it.
+          delete_prior_notice() {
+            local id
+            # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
+            id="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+              --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.MARKER)) | .id' \
+              2>/dev/null | tail -n 1 || true)"
+            if [ -n "$id" ]; then
+              if gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1; then
+                echo "withdrew the standing no-verdict notice on $REPO#$PR"
+              else
+                echo "::warning::could not withdraw the no-verdict notice $id on $REPO#$PR"
+              fi
+            fi
+          }
+
           # The check run's own summary, not a second account of the same run. That
           # check is published above and a reader compares the two; one string is what
           # keeps them from disagreeing. jq's error goes to the log and the value comes
@@ -1636,38 +1715,32 @@ jobs:
           # driver said why. The other never got as far as the driver -- a failed
           # install, a toolchain that would not resolve -- and has no reason to give, so
           # this says that rather than implying the review ran.
+          started=true
           if [ -z "$reason" ]; then
             reason="This run recorded no reason, which happens when it stopped before the review started."
+            started=false
           fi
           body="$(printf '%s\n%s\n\n%s\n\n%s\n' \
             "$MARKER" \
             '**This review did not complete.** It reached no verdict, so there is no review of this change to act on.' \
             "$reason" \
             "Read this run for the rest: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
-          # One notice per pull request, updated in place. The verdict comment
-          # accumulates on purpose -- an author compares this review against the last
-          # one -- but a notice that the review did not complete carries no such
-          # history, and an outage on a caller wired to every push would leave one
-          # identical copy per push.
+          # One notice per pull request: the previous one is deleted and a new one is
+          # posted. The verdict comment accumulates on purpose -- an author compares
+          # this review against the last one -- but a notice that the review did not
+          # complete carries no such history, and an outage on a caller wired to every
+          # push would leave one identical copy per push.
           #
-          # Matched on the marker at the start of the body, and only on this tool's own
-          # comments, so a person quoting the marker cannot take the notice over. The
-          # read is guarded: a listing that fails leaves the id empty and this posts,
-          # which costs a duplicate notice rather than the notice itself.
+          # Deleted and reposted rather than edited, for the reason `Post the verdict`
+          # states about itself: an edit stays where it was in the thread and notifies
+          # nobody, so a second consecutive failure would reach the person who just
+          # asked as nothing at all. Posting lands it at the bottom, carrying this run's
+          # url.
           #
-          # One id per line, and the last line wins. --paginate runs the filter once per
-          # page, so aggregating inside jq emits one result per page and concatenates
-          # them into a string no comment carries.
-          # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
-          existing="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
-            --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.MARKER)) | .id' \
-            2>/dev/null | tail -n 1 || true)"
-          if [ -n "$existing" ]; then
-            if gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null; then
-              echo "updated the no-verdict notice on $REPO#$PR"
-              exit 0
-            fi
-          elif gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
+          # A deletion that fails costs a duplicate notice; the post below runs either
+          # way, so the person who asked always gets an answer.
+          delete_prior_notice
+          if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
             echo "reported a no-verdict review on $REPO#$PR"
             exit 0
           fi
@@ -1675,7 +1748,11 @@ jobs:
           # from adding a second failure to a job the drive step already failed, and it
           # also removes the only signal there was -- so the report goes to the log
           # where the run still holds it.
-          echo "::error::the review reached no verdict, and that could not be reported on $REPO#$PR; this run's log is the only record"
+          if [ "$started" = true ]; then
+            echo "::error::the review reached no verdict, and that could not be reported on $REPO#$PR; this run's log is the only record"
+          else
+            echo "::error::this run stopped before the review started, and that could not be reported on $REPO#$PR; this run's log is the only record"
+          fi
           echo "--- report, unposted ---"
           printf '%s\n' "$body"
           echo "--- end report ---"
