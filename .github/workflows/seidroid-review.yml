@@ -1382,16 +1382,21 @@ jobs:
           # Counting every marked thread instead would report a shortened conversation on
           # a run that carried no history at all, which says nothing true about what the
           # review is working from.
+          #
+          # The window plus one, because totalCount counts the root and the root is
+          # fetched separately and carried in `body`. At totalCount 21 the recent window
+          # holds comments 2 to 21, which is every reply there is, and the history is
+          # whole; the first comment a reader actually loses appears at 22.
           # shellcheck disable=SC2016  # $ENV is jq's
           shortened="$(jq --argjson window 20 '[ .[]
                           | select((.root.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
                           | select(.root.nodes[0].author.login
                                    | . != null and . != ""
                                      and (. == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))
-                          | select(.recent.totalCount > $window)
+                          | select(.recent.totalCount > $window + 1)
                         ] | length' "$THREADS.raw")"
           if [ "$shortened" -gt 0 ]; then
-            echo "::warning::$shortened of this tool's thread(s) on $REPO#$PR carry more than 20 comments; this review reads the 20 most recent of each and the older ones are not in its history"
+            echo "::warning::$shortened of this tool's thread(s) on $REPO#$PR carry more replies than this read holds; the 20 most recent of each are in the history and the older ones are not"
           fi
 
           # A marked thread that the login test drops is worth a line, because the two
