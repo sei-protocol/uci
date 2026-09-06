@@ -352,6 +352,11 @@ jobs:
             # every other @seidroid body reaches the conversational assistant, and a
             # chatty answer to this reads as a review that ran somewhere.
             #
+            # notice, not error, because a denied request is a notice throughout
+            # ai-review: an unauthorised actor, an unlisted bot, a draft and an empty
+            # team all deny at that level. error there is reserved for a caller that
+            # wired the workflow wrongly.
+            #
             # Matched on the same whole-line anchor the command grammar above uses,
             # so the refusal covers exactly the shapes that fall through it.
             #
@@ -363,7 +368,7 @@ jobs:
             named_repo="$(printf '%s\n' "$cmd" \
               | grep -m1 -E '^[[:space:]]*@?seidroid[[:space:]]+review([[:space:]]+close)?[[:space:]]+[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*#[0-9]+[[:space:]]*$' || true)"
             if [ -n "$named_repo" ]; then
-              echo "::error::seidroid review takes no repository target; a review runs only on the repository the pull request is on"
+              echo "::notice::seidroid review takes no repository target; a review runs only on the repository the pull request is on"
             fi
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
