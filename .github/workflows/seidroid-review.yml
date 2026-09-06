@@ -1347,10 +1347,9 @@ jobs:
           echo "findings: $on_line on a line, $on_file on a file, $unplaced in the summary"
 
       - name: Publish the review check run
-        # The half of a review a reader sees without opening it. Named review
-        # rather than "AI Review": both systems run during the transition and both
-        # post as seidroid[bot], so two checks under one name would be unreadable,
-        # where a green AI Review beside a red review is not.
+        # The half of a review a reader sees without opening it. The check of record
+        # is named review, and the same verdict goes out under `AI Review` as well,
+        # for the reason the second publish below states.
         #
         # Whichever check the driver wrote, decided or not. A run that reached no
         # verdict writes one under the title `no verdict`, naming why, and publishing
@@ -1402,6 +1401,8 @@ jobs:
             echo "::error::the check file on $REPO#$PR carries no conclusion, so there is nothing to publish as the merge gate"
             exit 1
           fi
+          title="$(jq -r '.title // "review"' "$CHECK" || true)"
+          summary="$(jq -r '.summary // ""' "$CHECK" || true)"
           # Against the commit the review read, recorded before it started and used
           # as recorded. A check on any other commit attaches this verdict to code the
           # review never saw, so the head is not read again here.
@@ -1414,14 +1415,41 @@ jobs:
             echo "::error::the reviewed commit was not recorded on $REPO#$PR, so the review check run cannot be published; the verdict comment is the only record of this review"
             exit 1
           fi
-          gh api -X POST "repos/$REPO/check-runs" \
-            -f name=review \
-            -f head_sha="$head_sha" \
-            -f status=completed \
-            -f conclusion="$conclusion" \
-            -f output[title]="$(jq -r '.title // "review"' "$CHECK")" \
-            -f output[summary]="$(jq -r '.summary // ""' "$CHECK")" >/dev/null
-          echo "published review check: $conclusion — $(jq -r '.title // "review"' "$CHECK")"
+          publish() {
+            gh api -X POST "repos/$REPO/check-runs" \
+              -f name="$1" \
+              -f head_sha="$head_sha" \
+              -f status=completed \
+              -f conclusion="$conclusion" \
+              -f output[title]="$title" \
+              -f output[summary]="$summary" >/dev/null
+          }
+          # The check of record, and the only publish here that can fail the step. A
+          # failure exits it under set -e, and continue-on-error above decides what
+          # that costs the job.
+          publish review
+          names="check run review"
+          # The same verdict under the name ai-review.yml publishes. A branch-protection
+          # rule matches a check by its name, so only a check called `AI Review`
+          # satisfies a rule that requires `AI Review`. The rules on the calling
+          # repositories are org-level, and no token here can read them, so this step
+          # publishes both names and a rule that requires either one passes. Delete this
+          # call once someone who can read those rules confirms that none names
+          # `AI Review`.
+          #
+          # Best-effort, and that is the whole difference from the publish above. A
+          # failure here warns and the step still succeeds, so the copy never decides
+          # whether the review reached the pull request.
+          #
+          # A repository that also runs ai-review.yml under this App gets two checks
+          # called `AI Review` on the commit. GitHub keeps both. The checks list and
+          # the merge gate read the one that completed last.
+          if publish "AI Review"; then
+            names="check runs review and AI Review"
+          else
+            echo "::warning::the AI Review copy of the review check could not be published on $REPO#$PR; review carries the verdict"
+          fi
+          echo "published $names: $conclusion — $title"
 
       - name: State the review's position on the pull request
         # The check run is the gate a merge reads; this is the one a person reads,
