@@ -1236,17 +1236,20 @@ jobs:
           #
           # The reaction and the one it replaces are chosen in one statement, so the
           # two cannot drift apart.
+          # A conclusion earning no reaction still clears both. The comment carries what
+          # the last run left there, so a run that reaches neither verdict would otherwise
+          # leave the request wearing a thumb from a verdict this run did not reach.
           case "$conclusion" in
-            failure) reaction="-1"; opposite="+1" ;;
-            success) reaction="+1"; opposite="-1" ;;
+            failure) reaction="-1"; stale="+1" ;;
+            success) reaction="+1"; stale="-1" ;;
             *)
               echo "a ${conclusion:-missing} conclusion earns no reaction; the verdict comment carries what it found"
-              exit 0 ;;
+              reaction=""; stale="+1 -1" ;;
           esac
 
-          # Withdraw this bot's own opposite reaction first. A reaction is not a toggle
-          # and a re-run replays the same comment id, so a verdict that flipped would
-          # leave the comment wearing both. Scoped to the reacting identity: a human who
+          # Withdraw this bot's stale thumbs first. A reaction is not a toggle and a
+          # re-run replays the same comment id, so a comment would otherwise wear a
+          # verdict this run did not reach. Scoped to the reacting identity: a human who
           # thumbed the request down is voicing an opinion, and it is not this job's to
           # delete.
           #
@@ -1259,20 +1262,25 @@ jobs:
           # miss leaves the comment wearing both thumbs.
           if ! mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
                          --paginate \
-                         --jq ".[] | select(.content == \"$opposite\" and .user.login == \"$me\") | .id")"; then
-            echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; a $opposite from this bot may stay beside the $reaction"
+                         --jq ".[] | select(.user.login == \"$me\") | \"\\(.content) \\(.id)\"")"; then
+            echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; a stale thumb from this bot may stay on it"
             mine=""
           fi
-          while read -r rid; do
+          while read -r content rid; do
             [ -n "$rid" ] || continue
+            case " $stale " in *" $content "*) ;; *) continue ;; esac
             if gh api -X DELETE \
                  "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
                  >/dev/null; then
-              echo "withdrew this bot's $opposite from comment $TRIGGER_ID"
+              echo "withdrew this bot's $content from comment $TRIGGER_ID"
             else
-              echo "::warning::could not withdraw this bot's $opposite from comment $TRIGGER_ID in $TRIGGER_REPO; it stays beside the $reaction"
+              echo "::warning::could not withdraw this bot's $content from comment $TRIGGER_ID in $TRIGGER_REPO"
             fi
           done <<< "$mine"
+
+          # Nothing to post when the conclusion earned no reaction: the clearing above is
+          # the whole answer there.
+          [ -n "$reaction" ] || exit 0
 
           # Never fatal: a reaction is a courtesy, and losing one must not fail a review
           # that ran and published. Idempotent per identity and content, so a re-run on
