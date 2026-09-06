@@ -1654,10 +1654,14 @@ jobs:
           # comments, so a person quoting the marker cannot take the notice over. The
           # read is guarded: a listing that fails leaves the id empty and this posts,
           # which costs a duplicate notice rather than the notice itself.
+          #
+          # One id per line, and the last line wins. --paginate runs the filter once per
+          # page, so aggregating inside jq emits one result per page and concatenates
+          # them into a string no comment carries.
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           existing="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
-            --jq '[.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.MARKER)) | .id] | last // empty' \
-            2>/dev/null || true)"
+            --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.MARKER)) | .id' \
+            2>/dev/null | tail -n 1 || true)"
           if [ -n "$existing" ]; then
             if gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null; then
               echo "updated the no-verdict notice on $REPO#$PR"
