@@ -271,7 +271,17 @@ on:
         description: "omnigent machine-client secret, exchanged in-process for a session bearer. Mirrors the server's OMNIGENT_MACHINE_CLIENT_SECRET_HASH -- the server stores only a digest of this value. The one secret an operator must configure to use this workflow."
         required: true
       SEIDROID_APP_ID:
-        description: "seidroid GitHub App id. Optional: without it the review posts as the workflow's own identity, which is correct but reads as github-actions rather than the bot."
+        description: >-
+          seidroid GitHub App id. Optional: without it the review posts as the
+          workflow's own identity, which is correct but reads as github-actions rather
+          than the bot.
+
+          Changing it changes who withdraws a block. A protected branch that restricts
+          who may dismiss a review takes the dismissal only from a repository admin or
+          an actor on that list, whoever recorded the review. So put whichever identity
+          this workflow runs under on the list, and dismiss any standing block by hand
+          when you change the credential -- otherwise a later clean run fails on a
+          dismissal the API refuses.
         required: false
       SEIDROID_APP_PRIVATE_KEY:
         description: "seidroid GitHub App private key, exchanged for an installation token scoped to the calling repository. Never written to an output; the action masks it."
@@ -295,8 +305,13 @@ jobs:
     runs-on: ubuntu-latest
     # A step condition cannot read `secrets`, so its presence is tested here and
     # read back as `env` below — the same shape the review job uses.
+    #
+    # Both halves of the credential, because the mint below needs both and carries no
+    # continue-on-error. An id with no private key would run that step, fail it, and
+    # take the job with it -- where the App is optional and the answer is to fall back.
     env:
-      HAS_REVIEWER_IDENTITY: ${{ secrets.SEIDROID_APP_ID != '' }}
+      HAS_REVIEWER_IDENTITY: >-
+        ${{ secrets.SEIDROID_APP_ID != '' && secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
     # Set at all because the account default is six hours. The guard only reads
     # API state, so a minute is generous.
     timeout-minutes: 5
@@ -436,6 +451,11 @@ jobs:
           GH_TOKEN: ${{ steps.identity.outputs.token }}
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
           SKIP_LABEL: ${{ inputs.skip-review-label }}
+          # Which halves of the App credential the caller set. The label check below
+          # reads them to tell a caller that configured no App from one that
+          # configured half of it; the two deserve different answers.
+          APP_ID_PRESENT: ${{ secrets.SEIDROID_APP_ID != '' }}
+          APP_KEY_PRESENT: ${{ secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
           ACTOR: ${{ github.event.comment.user.login }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.parse.outputs.pr_number }}
@@ -487,9 +507,19 @@ jobs:
           # ...and it stops a REVIEW, not a teardown. A pull request that gains the
           # label after a session exists must still be able to reclaim its sandbox,
           # and nothing else will: no lifetime cap, no sweep.
-          if [ "$COMMAND" != "close" ] && [ -n "$SKIP_LABEL" ] && [ -n "${GH_TOKEN:-}" ]; then
-            if gh api "repos/$REPO/pulls/$PR" --jq '.labels[].name' 2>/dev/null                  | grep -qxF "$SKIP_LABEL"; then
-              deny "$REPO#$PR carries $SKIP_LABEL; not reviewing"
+          #
+          # It fails open for a caller that configured no App, and CLOSED for one that
+          # configured half of one. Half a credential mints no token, so the label
+          # cannot be read -- and a caller who set either secret meant to have the
+          # identity that reads it. Failing open there would review a pull request
+          # carrying the label, on the one configuration that cannot notice.
+          if [ "$COMMAND" != "close" ] && [ -n "$SKIP_LABEL" ]; then
+            if [ -n "${GH_TOKEN:-}" ]; then
+              if gh api "repos/$REPO/pulls/$PR" --jq '.labels[].name' 2>/dev/null                  | grep -qxF "$SKIP_LABEL"; then
+                deny "$REPO#$PR carries $SKIP_LABEL; not reviewing"
+              fi
+            elif [ "$APP_ID_PRESENT" = "true" ] || [ "$APP_KEY_PRESENT" = "true" ]; then
+              deny "half of the App credential is set, so $SKIP_LABEL cannot be read on $REPO#$PR; not reviewing. Pass both secrets, or unset the half that is set"
             fi
           fi
 
@@ -511,6 +541,32 @@ jobs:
           if [ "$SECRET_PRESENT" != "true" ]; then
             echo "::error::OMNIGENT_MACHINE_CLIENT_SECRET is not set on the calling repository; configure it as a repository or organization secret and pass it to this workflow" >&2
             exit 1
+          fi
+
+      # Half a credential mints nothing, and the review runs under the workflow's own
+      # identity instead of failing. That is the better outcome and a silent one, so
+      # this says it out loud. Not fatal: the App is optional, and a review under
+      # github-actions is a review.
+      #
+      # Either half alone, not just a missing key. A diagnostic with a blind spot
+      # sends the reader looking at the half that is already set.
+      #
+      # Step-level env, like the check above. A step `if` cannot read `secrets`; a
+      # step `env` can.
+      - name: Report a half-configured reviewer identity
+        if: steps.parse.outputs.should_run == 'true'
+        env:
+          APP_ID_PRESENT: ${{ secrets.SEIDROID_APP_ID != '' }}
+          APP_KEY_PRESENT: ${{ secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
+        run: |
+          missing=""
+          if [ "$APP_ID_PRESENT" = "true" ] && [ "$APP_KEY_PRESENT" != "true" ]; then
+            missing=SEIDROID_APP_PRIVATE_KEY
+          elif [ "$APP_KEY_PRESENT" = "true" ] && [ "$APP_ID_PRESENT" != "true" ]; then
+            missing=SEIDROID_APP_ID
+          fi
+          if [ -n "$missing" ]; then
+            echo "::warning::$missing is not set beside the other half of the App credential, so this review posts as github-actions[bot] rather than as the App. Pass both secrets for the App identity, or unset the half that is set"
           fi
 
   review:
@@ -594,7 +650,10 @@ jobs:
       # read. The secrets context is not one of those -- a step `if` that touches
       # it is a workflow-file error, not a false condition -- so the presence test
       # happens here, the same way the machine-client check below does it.
-      HAS_REVIEWER_IDENTITY: ${{ secrets.SEIDROID_APP_ID != '' }}
+      #
+      # Both halves, for the reason the guard's copy states.
+      HAS_REVIEWER_IDENTITY: >-
+        ${{ secrets.SEIDROID_APP_ID != '' && secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
     steps:
       # First, deliberately: the reaction is the only signal the trigger was
       # seen, and everything after it -- toolchain, driver install, session
@@ -1181,12 +1240,19 @@ jobs:
         # at its own site and stated there, so an unreadable check file, a position
         # the API refuses and a courtesy log line all stay quiet. What reaches the job
         # is the withdrawal.
+        #
+        # The App records the position where the caller configured one, and the
+        # workflow's own identity records it otherwise, so a repository with no App
+        # still takes a position and can still clear a block it left before. That
+        # identity reads as github-actions[bot], which costs two things a caller has
+        # to know: a merge gate that names its reviewers may not count it, and a
+        # repository whose Actions policy forbids an approval refuses the event
+        # outright. The COMMENT rung below answers the second.
         if: ${{ inputs.mode == 'review' && !cancelled()
-          && steps.drive.outputs.verdict_produced == 'true'
-          && steps.identity.outputs.token != '' }}
+          && steps.drive.outputs.verdict_produced == 'true' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ steps.identity.outputs.token }}
+          GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
@@ -1243,21 +1309,76 @@ jobs:
             note="review found nothing blocking."
           fi
 
-          if [ -n "$event" ]; then
-            # commit_id is omitted rather than sent empty when the commit is unknown:
-            # the API rejects an empty one, and its own default is the pull request's
-            # latest commit, which is the fallback announced above.
+          # commit_id is omitted rather than sent empty when the commit is unknown:
+          # the API rejects an empty one, and its own default is the pull request's
+          # latest commit, which is the fallback announced above.
+          #
+          # 0 posted, 2 refused, 1 anything else. Only a refusal earns the rung below:
+          # a 422 is the API declining the opinion itself, and every other failure is
+          # one a second call would meet again. That keeps a write that landed and then
+          # lost its connection from posting a second review.
+          #
+          # 422, and not 403. GitHub answers a self-review with 422 -- measured, as
+          # "Review Can not approve your own pull request" -- and answers a secondary
+          # rate limit with 403 or 429. This endpoint creates content and notifies, so
+          # it is one the API names as tripping that limit. A rung that fired on 403
+          # would turn a rate-limited REQUEST_CHANGES into a comment that blocks
+          # nothing, where one wait would have kept the block. The narrow rule costs
+          # the opposite case: a refusal that arrives as 403, such as an Actions policy
+          # that forbids an approval, earns no comment review and only the warning
+          # below. Losing the vote is the worse half, so the rule protects it.
+          #
+          # A 422 also covers a stale commit_id, which the rung retries with the same
+          # commit_id and meets identically. That costs one call and no review.
+          #
+          # The code comes from GitHub's error object, not from gh's message. gh writes
+          # the response to stdout and its own line to stderr, so a failed call leaves
+          # the error object in `body` -- and `status` on it is the code. gh's line is
+          # a human string outside its compatibility surface, and a reformat there
+          # would turn this rung into a silent no-op.
+          #
+          # `status` is documented on GitHub's Basic Error schema and measured on this
+          # endpoint's 422, but the 422's own schema does not declare it. So it can be
+          # absent, and an absent code returns 1: no rung, no downgrade. The vote
+          # survives a shape this cannot read, which is the same direction the 422 rule
+          # chooses above.
+          #
+          # gh's own line still reaches the log, where it says why.
+          post_position() {
+            local args body status
             args=(-X POST "repos/$REPO/pulls/$PR/reviews"
-                  -f event="$event" -f body="$MARKER"$'\n'"$note")
+                  -f event="$1" -f body="$MARKER"$'\n'"$note")
             if [ -n "$head_sha" ]; then
               args+=(-f commit_id="$head_sha")
             fi
+            body="$(gh api "${args[@]}")" && return 0
+            status="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
+            if [ "$status" = "422" ]; then
+              return 2
+            fi
+            return 1
+          }
+
+          if [ -n "$event" ]; then
             # Guarded, because set -e would abort the step here and take the
             # withdrawal below with it. A 422 on self-approval, a stale commit_id or
             # a transient 5xx must not also cost the pull request its retraction. The
             # API's own error stays on stderr, where it says why.
-            if gh api "${args[@]}" >/dev/null; then
+            #
+            # COMMENT is the rung under both events, and the same one ai-review takes.
+            # The API refuses an opinion the identity may not hold -- github-actions
+            # approving where the repository's Actions policy forbids it, or either
+            # identity taking a side on a pull request it opened itself -- and refuses
+            # nothing about a review that states its finding without voting. So the
+            # reviewers list still carries this run, and the check run still carries
+            # the gate. What the rung costs is the vote: an APPROVE that lands here
+            # clears no approval requirement, and a REQUEST_CHANGES blocks nothing.
+            rc=0
+            post_position "$event" || rc=$?
+            if [ "$rc" -eq 0 ]; then
               echo "recorded $event on $REPO#$PR"
+            elif [ "$rc" -eq 2 ] && post_position COMMENT; then
+              echo "::warning::$REPO#$PR would not take $event, so this review is recorded as a comment; the check run carries the $conclusion conclusion"
             else
               echo "::warning::could not record $event on $REPO#$PR; the verdict comment stands"
             fi
@@ -1342,7 +1463,7 @@ jobs:
               echo "withdrew review $id"
             else
               stuck=$((stuck+1))
-              echo "::error::could not withdraw review $id on $REPO#$PR; it still blocks the merge on a finding this run did not reproduce"
+              echo "::error::could not withdraw review $id on $REPO#$PR; it still blocks the merge on a finding this run did not reproduce. On a protected branch the API takes a dismissal only from a repository admin or an actor named in the branch's dismissal restriction, so check that this run's identity is one of them. A token without pull-requests: write is refused as well. Dismiss review $id by hand to clear it"
             fi
           done <<< "$ids"
           echo "superseded blocks: $withdrawn withdrawn, $stuck still standing"
@@ -1356,9 +1477,9 @@ jobs:
         # this step withdraws them and says how it ended.
         #
         # Its own step, and not part of the one that records the position: that step
-        # needs the App identity, and a repository without one would leave a requester
-        # with eyes and no answer -- the gap this closes. Everything here needs only
-        # GITHUB_TOKEN and the job's issues: write.
+        # is skipped for a run that reached no verdict, and the person who asked is
+        # owed an answer even then. Everything here needs only GITHUB_TOKEN and the
+        # job's issues: write.
         #
         # The condition names three facts: a review turn, not cancelled, and a comment
         # to answer. A close produces no verdict, so a request to tear a session down
