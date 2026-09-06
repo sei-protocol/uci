@@ -1653,11 +1653,25 @@ jobs:
           fi
           on_line=0 on_file=0 unplaced=0
 
-          # The third rung. Each line opens with a dash and a backtick, which is
-          # what the summary counts when it cuts the list to fit GitHub's limit.
+          # The third rung, in two groups. A finding reaches the summary because the
+          # diff has nowhere to attach it, or because the diff does carry its line and
+          # the call that would have posted it failed. The summary tells a reader which,
+          # so the second group is collected apart and headed for what it is. Both count
+          # as unplaced: neither reached the code.
+          #
+          # Each line opens with a dash and a backtick, which is what the summary counts
+          # when it cuts the list to fit GitHub's limit.
+          ondiff="$RUNNER_TEMP/review-unplaced-on-diff.md"
+          : > "$ondiff"
           # shellcheck disable=SC2016  # the backticks are markdown, not a substitution
           to_summary() {
             printf -- '- `%s:%s` (%s) — %s\n' "$1" "$2" "$4" "$5" >> "$NOTE"
+            unplaced=$((unplaced+1))
+            return 0
+          }
+          # shellcheck disable=SC2016  # the backticks are markdown, not a substitution
+          to_summary_ondiff() {
+            printf -- '- `%s:%s` (%s) — %s\n' "$1" "$2" "$4" "$5" >> "$ondiff"
             unplaced=$((unplaced+1))
             return 0
           }
@@ -1671,6 +1685,9 @@ jobs:
           # Guarded on the commit, not left to the API. Without one the call returns
           # 422, and asking for an answer known before the call spends the rate limit
           # on it.
+          #
+          # $6 is which summary group takes the finding if this rung refuses it too.
+          # The caller knows whether the diff carries the line; this does not.
           on_file_or_summary() {
             if [ -n "$head_sha" ] && gh api -X POST "repos/$REPO/pulls/$PR/comments" \
                  -f body="$FINDING_MARKER"$'\n'"**$4** — $5"$'\n\n'"_Cited at \`$1:$2\`, outside this diff's changed lines._" \
@@ -1679,7 +1696,7 @@ jobs:
               on_file=$((on_file+1))
               return 0
             fi
-            to_summary "$@"
+            "$6" "$1" "$2" "$3" "$4" "$5"
             return 0
           }
 
@@ -1707,11 +1724,11 @@ jobs:
           # Redirected into, never piped into. The counters the summary reads are
           # this shell's, and a pipe would count them in a subshell that exits.
           place_each() {
-            local placer="$1" path line side severity detail_b64 detail
+            local placer="$1" summary="$2" path line side severity detail_b64 detail
             while IFS=$'\t' read -r path line side severity detail_b64; do
               [ -z "$path" ] && continue
               detail="$(printf '%s' "$detail_b64" | base64 --decode)"
-              "$placer" "$path" "$line" "$side" "$severity" "$detail"
+              "$placer" "$path" "$line" "$side" "$severity" "$detail" "$summary"
             done
             return 0
           }
@@ -1743,8 +1760,8 @@ jobs:
             exit 0
           fi
 
-          # Which lines a comment can name, walked out of the pull request's own diff
-          # before anything is posted. RIGHT takes an added or a context line, LEFT
+          # Which lines a comment can name, walked out of the diff the fetch below
+          # reads, before anything is posted. RIGHT takes an added or a context line, LEFT
           # takes a removed or a context one, and ai-review walks the same patches the
           # same way. The walk covers only the files the findings name, so its size is
           # the finding count and not the diff's.
@@ -1773,17 +1790,43 @@ jobs:
                 loose: [ .[] | select(.ok | not) | del(.ok) ] }'
           files="$RUNNER_TEMP/review-pr-files.json"
           placement="$RUNNER_TEMP/review-placement.json"
-          # No --jq on the fetch. --paginate runs that filter once per page and
-          # would answer once per page; the slurp below reads what gh returns
-          # whichever shape it takes, one array or one array per page.
+          # The diff at the commit this review read, which is the commit every comment
+          # below names. GET /pulls/{n}/files answers for the pull request's current
+          # head and takes no commit: it accepts a sha parameter and ignores it,
+          # measured. So a push mid-review would index one commit and comment on
+          # another -- and a line marked from the newer diff that the older commit
+          # cannot carry costs the whole batch a 422. compare takes a commit.
+          #
+          # base.sha with three dots, so the API resolves the merge base itself and
+          # answers with the diff the pull request shows. A base branch that moves
+          # during the review does not move that merge base, because the reviewed
+          # commit is fixed and the fork point with it.
+          #
+          # Tested for the shape of a commit id, and not merely for emptiness. gh
+          # applies --jq to a success and writes the error object itself on a failure,
+          # so a refused read answers with a line of JSON on stdout and a non-zero
+          # status. Either one alone leaves that JSON in the variable and sends it to
+          # the API as a commit.
+          base_sha=""
+          if [ -n "$head_sha" ]; then
+            base_sha="$(gh api "repos/$REPO/pulls/$PR" --jq '.base.sha' 2>/dev/null)" || base_sha=""
+            case "$base_sha" in (''|*[!0-9a-f]*) base_sha="" ;; esac
+            if [ -z "$base_sha" ]; then
+              echo "::warning::the base commit of $REPO#$PR could not be read, so the diff at $head_sha cannot be; each finding is posted on its own"
+            fi
+          fi
+          # No --jq on the fetch. --paginate runs that filter once per page and would
+          # answer once per page. compare answers with an object per page rather than
+          # an array, so the pages are read for their files: merging two of these
+          # objects keeps one page's list and drops the other.
           batched=false
-          if [ -n "$head_sha" ] \
-             && gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" > "$files.raw" \
-             && jq -s 'add // []' "$files.raw" > "$files" \
+          if [ -n "$head_sha" ] && [ -n "$base_sha" ] \
+             && gh api --paginate "repos/$REPO/compare/$base_sha...$head_sha?per_page=100" > "$files.raw" \
+             && jq -s '[ .[] | (.files // [])[] ]' "$files.raw" > "$files" \
              && jq --slurpfile findings "$normal" "$partition" "$files" > "$placement"; then
             batched=true
           elif [ -n "$head_sha" ]; then
-            echo "::warning::the changed files of $REPO#$PR could not be read, so each finding is posted on its own; the review still reaches the code"
+            echo "::warning::the diff of $REPO#$PR at $head_sha could not be read, so each finding is posted on its own; the review still reaches the code"
           fi
 
           if [ "$batched" = true ]; then
@@ -1821,30 +1864,38 @@ jobs:
                 status="$(jq -r '.status // empty' "$response" 2>/dev/null || true)"
                 if [ "$status" = "422" ]; then
                   echo "::warning::$REPO#$PR refused the review carrying $anchored comment(s); each finding is posted on its own instead"
-                  place_each place_one < <(rows '.anchored[]' "$placement")
+                  place_each place_one to_summary_ondiff < <(rows '.anchored[]' "$placement")
                 else
                   echo "::warning::the review carrying $anchored comment(s) could not be posted on $REPO#$PR; those findings are in the summary instead of on the diff"
-                  place_each to_summary < <(rows '.anchored[]' "$placement")
+                  place_each to_summary_ondiff '' < <(rows '.anchored[]' "$placement")
                 fi
               fi
             fi
-            place_each on_file_or_summary < <(rows '.loose[]' "$placement")
+            place_each on_file_or_summary to_summary < <(rows '.loose[]' "$placement")
           else
-            place_each place_one < <(rows '.[]' "$normal")
+            place_each place_one to_summary < <(rows '.[]' "$normal")
           fi
-          # Two headers, because the summary collects findings for two reasons and
-          # only one of them is about the reader's code. With no commit to attach to,
-          # a finding on a changed line lands here as well, and calling it an
-          # observation off the changed lines tells the reader the wrong thing about
-          # their own diff.
-          if [ -s "$NOTE" ]; then
+          # A heading per reason, because the summary collects findings for three and
+          # only one of them is about code the reader did not change. With no commit to
+          # attach to, a finding on a changed line lands here as well; so does one whose
+          # review the API would not take. Filing either under "off the changed lines"
+          # tells the author the wrong thing about their own diff, and the second is the
+          # one that hides a real issue behind a heading that denies it.
+          if [ -s "$ondiff" ] || [ -s "$NOTE" ]; then
             if [ -n "$head_sha" ]; then
               header='**Observations off the changed lines.** These are about code this pull request does not touch, so there is nowhere in the diff to attach them:'
             else
               header='**Every finding is here.** The commit under review was not recorded, so none of these could be attached to a line of the diff:'
             fi
-            { printf -- '---\n\n%s\n\n' "$header"
-              cat "$NOTE"
+            { printf -- '---\n'
+              if [ -s "$ondiff" ]; then
+                printf -- '\n%s\n\n' '**On the changed lines, and not posted.** GitHub would not take the review carrying these, so they are here rather than on the lines they name:'
+                cat "$ondiff"
+              fi
+              if [ -s "$NOTE" ]; then
+                printf -- '\n%s\n\n' "$header"
+                cat "$NOTE"
+              fi
             } > "$NOTE.tmp"
             mv "$NOTE.tmp" "$NOTE"
           fi
