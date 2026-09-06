@@ -479,7 +479,12 @@ jobs:
     # cannot place, or against an author who asked for none.
     #
     # A caller must grant this workflow at least these two, because a reusable
-    # workflow may only downgrade what its caller granted.
+    # workflow may only downgrade what its caller granted. pull-requests: read is
+    # load-bearing rather than nice to have: the label check reads the pull request
+    # on every review, including an automatic one on a caller that configures no
+    # App, and it refuses the review when that read fails. GitHub's default token
+    # grants contents, packages and metadata only, so a caller that takes the
+    # default reviews nothing on a private repository.
     permissions:
       pull-requests: read   # the pull request the fork and label checks read, and the gate's reviews
       issues: read          # the comments the gate reads to find a verdict
@@ -749,7 +754,7 @@ jobs:
             carries="$(GH_TOKEN="$GATE_TOKEN" \
               gh api "repos/$REPO/pulls/$PR" \
               --jq 'any(.labels[]?.name; . == $ENV.SKIP_LABEL)')" \
-              || deny "could not read the labels on $REPO#$PR, so $SKIP_LABEL cannot be ruled out; not reviewing. Grant pull-requests: read on the calling job, or pass the App secrets, then ask again with @seidroid review"
+              || deny "could not read the labels on $REPO#$PR, so $SKIP_LABEL cannot be ruled out; not reviewing. Grant pull-requests: read on the calling job, or pass SEIDROID_APP_ID and SEIDROID_APP_PRIVATE_KEY"
             if [ "$carries" != "false" ]; then
               deny "$REPO#$PR carries $SKIP_LABEL; not reviewing"
             fi
@@ -899,9 +904,11 @@ jobs:
     # event is the trigger — so it runs even though the guard was skipped. always()
     # is required: a skipped dependency would otherwise skip this too.
     #
-    # A close asked for in a COMMENT is a different thing and does need one. It is a
-    # person destroying a session, so it goes through the same team gate the review
-    # does; the only ungated close is the one the platform itself reports.
+    # A close asked for in a COMMENT is a different thing and does need one. The
+    # guard admits it on two things only: the comment grammar it parses, and the
+    # OWNER/MEMBER/COLLABORATOR filter on the job condition. The team, fork and
+    # label checks all exempt a teardown, because a close a check refuses leaves a
+    # sandbox that nothing else reclaims.
     # !cancelled() rather than always(), and the guard's RESULT rather than only its
     # output. always() started this job when the guard had failed -- the secret check
     # is the last thing the guard does, so should_run is already set by then and the
