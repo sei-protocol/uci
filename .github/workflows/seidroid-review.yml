@@ -144,6 +144,18 @@ on:
 
           It governs the automatic path alone. An explicit `@seidroid review`
           comment is answered however many reviews have already run.
+
+          Two consequences of leaving it off. The refusal is a notice on the
+          workflow run: an author who pushes and sees no new review reads nothing
+          on the pull request that says why, or that a comment asks for one. And
+          the `review` check run is published against the commit a review read,
+          so every head after the first carries none -- a repository that
+          REQUIRES that check would sit pending rather than fail. Turn this on
+          there, or require the workflow job instead.
+
+          A pull request this workflow has blocked is reviewed again whatever
+          this says. The withdrawal lives inside a review, so refusing the run
+          would strand the block.
         required: false
         type: boolean
         default: false
@@ -571,12 +583,40 @@ jobs:
           # The comment path never reaches this. A person who asks for a review by
           # name is answered, however many have already run.
           #
-          # Last of the checks, and the only one that pages the API.
+          # Last of the checks, and the only one that pages the API. It makes at
+          # most two reads, and a block found on the first skips the second.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             re_review=false
             if [ "$ACTION" = "synchronize" ] && [ "$RE_REVIEW_ON_PUSH" = "true" ]; then
               re_review=true
             fi
+            # A standing block exempts the pull request. The withdrawal lives inside a
+            # later review, so a gate that refuses every automatic run also refuses the
+            # only run that can retract a CHANGES_REQUESTED this workflow left. The
+            # author pushes the fix and the block stands, clearable by a comment they
+            # were never told to write.
+            #
+            # A dismissed review reads as DISMISSED, so what this finds is a block that
+            # is still standing. The same shape the withdrawal itself looks for.
+            if [ "$re_review" = "false" ]; then
+              # A read that fails cannot rule a block out, so the gate admits and lets
+              # the review look. That costs one review. A refusal costs the withdrawal
+              # of a merge gate this workflow itself left standing, which then needs a
+              # human. The API's own error goes to the log, where it says why.
+              read_ok=true
+              # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+              blocked="$(GH_TOKEN="$GATE_TOKEN" \
+                gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+                --jq '.[] | select(.state == "CHANGES_REQUESTED" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
+              if [ -n "$blocked" ]; then
+                echo "::notice::$REPO#$PR carries a block from this workflow, so this review runs to withdraw it"
+                re_review=true
+              elif [ "$read_ok" = "false" ]; then
+                echo "::warning::could not read the reviews on $REPO#$PR, so a block this workflow left cannot be ruled out; this review proceeds to withdraw one"
+                re_review=true
+              fi
+            fi
+
             if [ "$re_review" = "false" ]; then
               # The author is tested by type rather than by login: the verdict
               # posts under the App identity where a caller configured one and
@@ -595,14 +635,19 @@ jobs:
               # the most comments to page through. The page size rides in the
               # path because `-F` on a `gh api` that names no `-X` makes the
               # request a POST, and this one only ever reads.
+              #
+              # A verdict found is a verdict found, whatever the read did afterwards.
+              # --paginate streams a page at a time, so a read that finds one on page 1
+              # and then meets a 5xx on page 3 exits non-zero holding it -- and the pull
+              # request that pages is the one this gate is worth most on.
+              read_ok=true
               # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
-              if prior="$(GH_TOKEN="$GATE_TOKEN" \
-                   gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
-                   --jq '.[] | select(.user.type == "Bot" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')"; then
-                if [ -n "$prior" ]; then
-                  deny "$REPO#$PR already carries a verdict from this workflow and re-review-on-push is off; comment @seidroid review to ask for another"
-                fi
-              else
+              prior="$(GH_TOKEN="$GATE_TOKEN" \
+                gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+                --jq '.[] | select(.user.type == "Bot" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
+              if [ -n "$prior" ]; then
+                deny "$REPO#$PR already carries a verdict from this workflow and re-review-on-push is off; comment @seidroid review to ask for another"
+              elif [ "$read_ok" = "false" ]; then
                 echo "::warning::could not read the comments on $REPO#$PR, so a review that already ran cannot be found; this one proceeds"
               fi
             fi
