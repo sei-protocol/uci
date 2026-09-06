@@ -13,8 +13,10 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
 # wires that trigger and passes `mode: review`. A MANUAL one runs when a person
 # comments `@seidroid review`. Both spend model quota and hold a sandbox, so both are
-# gated -- see the guard below: the automatic path refuses a draft and honours the
-# skip-review label, and the manual path additionally checks who is asking.
+# gated -- see the guard below: the automatic path reviews a pull request once,
+# reviews each later push only where the caller sets `re-review-on-push` or a block
+# of its own stands, refuses a draft and honours the skip-review label; and the
+# manual path additionally checks who is asking.
 #
 # This file is the automation of record. It REPLACES `ai-review.yml` rather than
 # running beside it; a repository that wires the automatic path here should retire
@@ -127,6 +129,40 @@ on:
         required: false
         type: string
         default: 'ai: skip-review'
+      re-review-on-push:
+        description: >-
+          Review again on every push to a pull request this workflow has already
+          reviewed. Off by default: one automatic review per pull request, and a
+          person asks for the next one by name.
+
+          Off does not mean exactly one. A review that finds something blocking
+          leaves a CHANGES_REQUESTED, only a later review withdraws it, so this
+          workflow reviews every push after that one until a review comes back
+          clean. Size the saving on that: it covers the pull requests that pass
+          first time, and a pull request pushed to ten times under a block costs
+          ten reviews with this off.
+
+          Each review holds a managed sandbox for up to `timeout-minutes` and
+          spends model quota, so a pull request pushed to ten times costs ten of
+          each. It also posts ten verdicts.
+
+          A push is the only event either rule covers. Reopening a pull request
+          or relabelling it changes no code, so neither earns a second review,
+          whatever this says and whether or not a block stands.
+
+          It governs the automatic path alone. An explicit `@seidroid review`
+          comment is answered however many reviews have already run.
+
+          Two consequences of leaving it off. The refusal is a notice on the
+          workflow run: an author who pushes and sees no new review reads nothing
+          on the pull request that says why, or that a comment asks for one. And
+          the `review` check run is published against the commit a review read,
+          so every head after the first carries none -- a repository that
+          REQUIRES that check would sit pending rather than fail. Turn this on
+          there, or require the workflow job instead.
+        required: false
+        type: boolean
+        default: false
       guidelines-file:
         description: >-
           The repository's own review standards, read from the base branch and
@@ -289,6 +325,31 @@ on:
 
 permissions: {}
 
+# The marker that opens every verdict this workflow leaves, in one place. Three
+# steps use it: the guard finds a review that already ran, the position step opens
+# the review it records with it and matches on it to withdraw an earlier block, and
+# the verdict comment opens with it. A workflow-level env reaches every step, so
+# those uses cannot drift apart. A step-level key of this name shadows this one;
+# there is none.
+#
+# It scopes all of that to this tool's own work. ai-review posts under the same bot
+# identity and marks its reviews differently; its position is not this one's to
+# change.
+#
+# Changing the value strands every blocking review posted under the old one: the
+# withdrawal matches on startswith, so a later clean run approves and retracts
+# nothing, the pull request stays red for a finding that is gone, and only a human
+# can clear it. It also makes every reviewed pull request read as unreviewed to the
+# guard. Before changing it, confirm no open pull request carries a
+# CHANGES_REQUESTED review or a verdict comment whose body starts with the old
+# value.
+#
+# The no-verdict notice and the inline findings carry their own markers, and
+# neither starts with this one. A run that reached no verdict does not read as
+# reviewed.
+env:
+  VERDICT_MARKER: "<!-- seidroid-review -->"
+
 jobs:
   guard:
     # Cheap allowlist + command parse on a hosted runner, no secrets, before any
@@ -315,7 +376,21 @@ jobs:
     # Set at all because the account default is six hours. The guard only reads
     # API state, so a minute is generous.
     timeout-minutes: 5
-    permissions: {}
+    # Read-only, and only what the once-per-PR gate below reads. It makes two
+    # reads: a review, to find a standing block, on a pull-requests endpoint; and a
+    # comment, to find a verdict, on the ISSUE comments endpoint. GitHub documents
+    # that second one as taking either permission, so pull-requests alone serves
+    # it. issues: read is granted beside it so the read does not rest on that
+    # alias. A reaction is the stricter case and takes issues alone; the review job
+    # says so where it needs it.
+    #
+    # The gate prefers the App identity and falls back to this, so a caller that
+    # configures no App still gets one review per pull request rather than one per
+    # push. That fallback is why a refused read would cost most here: it fails
+    # open, so a review runs on every push, and only the run log says why.
+    permissions:
+      pull-requests: read   # the reviews the gate reads to find a standing block
+      issues: read          # the comments it reads to find a verdict
     # Runs for an automatic pull_request review, and for any comment-triggered
     # dispatch, review or close. For a comment it decides whether the commenter may
     # command this workflow at all; for an automatic review it decides whether the
@@ -463,6 +538,14 @@ jobs:
           COMMAND: ${{ steps.parse.outputs.command }}
           EVENT_NAME: ${{ github.event_name }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
+          ACTION: ${{ github.event.action }}
+          RE_REVIEW_ON_PUSH: ${{ inputs.re-review-on-push }}
+          # The App identity where a caller configured one, this workflow's own
+          # token where it did not. Named apart from GH_TOKEN above because the
+          # team check has no such fallback: reading an organisation's teams
+          # needs an identity that can see them, and GITHUB_TOKEN cannot, where
+          # reading the comments below needs no more than pull-requests: read.
+          GATE_TOKEN: ${{ steps.identity.outputs.token || github.token }}
         run: |
           set -uo pipefail
           deny() { echo "::notice::$1"; echo "admit=false" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -520,6 +603,92 @@ jobs:
               fi
             elif [ "$APP_ID_PRESENT" = "true" ] || [ "$APP_KEY_PRESENT" = "true" ]; then
               deny "half of the App credential is set, so $SKIP_LABEL cannot be read on $REPO#$PR; not reviewing. Pass both secrets, or unset the half that is set"
+            fi
+          fi
+
+          # One automatic review per pull request. The verdict comment is the
+          # record that one already ran: this workflow posts one for every review
+          # that reaches a verdict, it hangs on the pull request rather than on a
+          # commit, and a push does not remove it. The review check run is keyed
+          # on the head commit, so a push leaves none behind and every push would
+          # read as a first review.
+          #
+          # The comment path never reaches this. A person who asks for a review by
+          # name is answered, however many have already run.
+          #
+          # Last of the checks, and the only one that pages the API. It makes at
+          # most two reads, and a block found on the first skips the second.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            re_review=false
+            if [ "$ACTION" = "synchronize" ] && [ "$RE_REVIEW_ON_PUSH" = "true" ]; then
+              re_review=true
+            fi
+            # A standing block exempts a PUSH to the pull request. The withdrawal lives
+            # inside a later review, so a gate that refuses every automatic run also
+            # refuses the only run that can retract a CHANGES_REQUESTED this workflow
+            # left. The author pushes the fix and the block stands, clearable by a
+            # comment they were never told to write.
+            #
+            # Scoped to `synchronize` for the reason the input above is: reopening a
+            # pull request or relabelling it changes no code, so a review of it reaches
+            # the finding the block already names. The block is still accurate, and the
+            # next push is what clears it.
+            #
+            # A dismissed review reads as DISMISSED, so what this finds is a block that
+            # is still standing. The same shape the withdrawal itself looks for.
+            if [ "$re_review" = "false" ] && [ "$ACTION" = "synchronize" ]; then
+              # A read that fails cannot rule a block out, so the gate admits and lets
+              # the review look. That costs one review. A refusal costs the withdrawal
+              # of a merge gate this workflow itself left standing, which then needs a
+              # human. The API's own error goes to the log, where it says why.
+              read_ok=true
+              # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+              blocked="$(GH_TOKEN="$GATE_TOKEN" \
+                gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+                --jq '.[] | select(.state == "CHANGES_REQUESTED" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
+              if [ -n "$blocked" ]; then
+                echo "::notice::$REPO#$PR carries a block from this workflow, so this review runs to withdraw it"
+                re_review=true
+              elif [ "$read_ok" = "false" ]; then
+                echo "::warning::could not read the reviews on $REPO#$PR, so a block this workflow left cannot be ruled out; this review proceeds to withdraw one"
+                re_review=true
+              fi
+            fi
+
+            if [ "$re_review" = "false" ]; then
+              # The author is tested by type rather than by login: the verdict
+              # posts under the App identity where a caller configured one and
+              # under this workflow's own where it did not. The marker at the
+              # top of this file must open the body. A person quoting it is not
+              # a Bot, and a bot that mentions it does not open with it, so
+              # neither reads as a verdict.
+              #
+              # It fails open, the way the label check above does. A read that
+              # fails costs one extra review, and the next push corrects it. A
+              # refusal on a signal this step could not read costs the review
+              # itself, on a pull request whose author never learns it was
+              # refused.
+              #
+              # A full page at a time: the pull request this gate matters most
+              # on is the one pushed to ten times, which is also the one carrying
+              # the most comments to page through. The page size rides in the
+              # path because `-F` on a `gh api` that names no `-X` makes the
+              # request a POST, and this one only ever reads.
+              #
+              # A verdict found is a verdict found, whatever the read did afterwards.
+              # --paginate streams a page at a time, so a read that finds one on page 1
+              # and then meets a 5xx on page 3 exits non-zero holding it -- and the pull
+              # request that pages is the one this gate is worth most on.
+              read_ok=true
+              # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+              prior="$(GH_TOKEN="$GATE_TOKEN" \
+                gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+                --jq '.[] | select(.user.type == "Bot" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
+              if [ -n "$prior" ]; then
+                deny "$REPO#$PR already carries a verdict from this workflow, and this $ACTION event does not earn another; comment @seidroid review to ask for one"
+              elif [ "$read_ok" = "false" ]; then
+                echo "::warning::could not read the comments on $REPO#$PR, so a review that already ran cannot be found; this one proceeds"
+              fi
             fi
           fi
 
@@ -1258,17 +1427,6 @@ jobs:
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           CHECK: ${{ steps.drive.outputs.check_path }}
           APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
-          # Scopes the withdrawal below to this tool's own blocks. ai-review posts
-          # under the same bot identity and marks its reviews differently; its
-          # position is not this one's to change.
-          #
-          # Changing this value strands every blocking review posted under the old one:
-          # the withdrawal matches on startswith, so a later clean run approves and
-          # retracts nothing, the pull request stays red for a finding that is gone, and
-          # only a human can then clear it. Before changing it, confirm no open pull
-          # request carries a CHANGES_REQUESTED review whose body starts with the old
-          # value.
-          MARKER: "<!-- seidroid-review -->"
         run: |
           set -euo pipefail
           if [ ! -s "$CHECK" ]; then
@@ -1347,7 +1505,7 @@ jobs:
           post_position() {
             local args body status
             args=(-X POST "repos/$REPO/pulls/$PR/reviews"
-                  -f event="$1" -f body="$MARKER"$'\n'"$note")
+                  -f event="$1" -f body="$VERDICT_MARKER"$'\n'"$note")
             if [ -n "$head_sha" ]; then
               args+=(-f commit_id="$head_sha")
             fi
@@ -1444,8 +1602,13 @@ jobs:
           #
           # A list this step cannot read is a block it cannot find, which reads the
           # same on the pull request as a block it failed to clear.
+          #
+          # The marker reaches jq through the environment, the way the guard passes
+          # it. A value carrying a quote or a backslash is data to jq here, where
+          # substituting it into the program would make it syntax.
+          # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
           if ! ids="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-                        --jq "[.[] | select(.state == \"CHANGES_REQUESTED\" and ((.body // \"\") | startswith(\"$MARKER\")))] | .[].id")"; then
+                        --jq '[.[] | select(.state == "CHANGES_REQUESTED" and ((.body // "") | startswith($ENV.VERDICT_MARKER)))] | .[].id')"; then
             echo "::error::could not list the reviews to withdraw on $REPO#$PR; an earlier block may still stand and only a human can clear it"
             exit 1
           fi
@@ -1607,7 +1770,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
-          MARKER: "<!-- seidroid-review -->"
           # The reviewed pull request, which is where a reader looks for a review.
           REPO: ${{ github.repository }}
           PR: ${{ needs.guard.outputs.pr_number }}
@@ -1630,8 +1792,8 @@ jobs:
           # annotation is the only record.
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           # The notice an earlier no-verdict run left, which this verdict supersedes.
-          # Its own name: MARKER above is this comment's, and one env block cannot
-          # carry two keys of one name.
+          # Its own name and its own value: a notice that reports no verdict has to be
+          # addressable apart from the verdict itself.
           NO_VERDICT_MARKER: "<!-- seidroid-review:no-verdict -->"
           # GitHub rejects an issue comment over 65,536 characters. The driver bounds
           # the verdict it writes and clips its own text to fit (review.MaxBodyBytes,
@@ -1649,7 +1811,7 @@ jobs:
           NOTICE_BYTES: 256
         run: |
           set -euo pipefail
-          body="$MARKER"$'\n'"$(cat "$VERDICT")"
+          body="$VERDICT_MARKER"$'\n'"$(cat "$VERDICT")"
 
           # The findings line, in the shape ai-review posts, so a reader moving between
           # the two reviewers during the transition reads one format. Assembled here
