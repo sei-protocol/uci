@@ -106,13 +106,25 @@ on:
         default: 'v0.15.0'
       allowed-team:
         description: >-
-          org/team-slug whose active members may ask for a review. Empty keeps the
-          author-association check below as the only gate, which admits any
-          collaborator on the repository the request was made in — set this to
-          narrow that to a team.
+          org/team-slug whose active members may ask for a review by comment. Empty
+          denies every commenter, which is what ai-review.yml does with the same
+          input under the same default.
+
+          It gates the comment path alone. An automatic pull_request review has no
+          commanding actor, so the guard skips this check there and reviews a pull
+          request opened by anyone.
+
+          The membership read takes "Members" organization permissions, which a
+          GITHUB_TOKEN cannot carry. Only the App identity can answer it, so a caller
+          that configures no App is refused on the comment path. Pass SEIDROID_APP_ID
+          and SEIDROID_APP_PRIVATE_KEY to use that path. Setting this input empty is
+          not the way out: empty denies.
+
+          Two things still work without the App. An automatic pull_request review
+          never reaches this check, and neither does `@seidroid review close`.
         required: false
         type: string
-        default: ''
+        default: 'sei-protocol/sei-core'
       approve-on-success:
         description: >-
           Approve the pull request when the review concludes clean. Off by
@@ -363,9 +375,14 @@ on:
         required: true
       SEIDROID_APP_ID:
         description: >-
-          seidroid GitHub App id. Optional: without it the review posts as the
-          workflow's own identity, which is correct but reads as github-actions rather
-          than the bot.
+          seidroid GitHub App id. Optional for an automatic review, REQUIRED to ask
+          for one by comment.
+
+          Without it the review posts as the workflow's own identity, which is correct
+          but reads as github-actions rather than the bot. And the guard's team check
+          cannot read organisation membership, so it refuses every `@seidroid review`
+          comment and says why in the run log. An automatic pull_request review and
+          `@seidroid review close` still run.
 
           Changing it changes who withdraws a block. A protected branch that restricts
           who may dismiss a review takes the dismissal only from a repository admin or
@@ -455,15 +472,21 @@ jobs:
     # stricter case and takes issues alone; the review job says so where it needs it.
     #
     # Every reader prefers the App identity and falls back to this, so a caller that
-    # configures no App still gets all three. A refused read costs them differently,
+    # configures no App still gets all four. A refused read costs them differently,
     # and both costs are deliberate. The once-per-PR gate fails open: a review runs on
-    # every push, and only the run log says why. The fork check fails closed: the
-    # guard refuses the review rather than run it over code it cannot place.
+    # every push, and only the run log says why. The fork check and the skip-review
+    # label fail closed: the guard refuses the review rather than run it over code it
+    # cannot place, or against an author who asked for none.
     #
     # A caller must grant this workflow at least these two, because a reusable
-    # workflow may only downgrade what its caller granted.
+    # workflow may only downgrade what its caller granted. pull-requests: read is
+    # load-bearing rather than nice to have: the label check reads the pull request
+    # on every review, including an automatic one on a caller that configures no
+    # App, and it refuses the review when that read fails. GitHub's default token
+    # grants contents, packages and metadata only, so a caller that takes the
+    # default reviews nothing on a private repository.
     permissions:
-      pull-requests: read   # the pull request the fork check reads, and the gate's reviews
+      pull-requests: read   # the pull request the fork and label checks read, and the gate's reviews
       issues: read          # the comments the gate reads to find a verdict
     # Runs for an automatic pull_request review, and for any comment-triggered
     # dispatch, review or close. For a comment it decides whether the commenter may
@@ -509,7 +532,6 @@ jobs:
             {
               echo "should_run=true"
               echo "pr_number=$PR_NUMBER"
-              echo "command=review"
               echo "comment_id="
             } >> "$GITHUB_OUTPUT"
             exit 0
@@ -558,26 +580,15 @@ jobs:
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "should_run=true" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          # Which of the two was asked for. The caller routes on the body as well and
-          # passes the mode, but the guard has to know too: a close is teardown, and
-          # some checks below stop a review without having any business stopping a
-          # reclaim.
-          # Anchored on the word the grammar accepts, immediately after `review`,
-          # rather than found anywhere on the line, so nothing that merely contains
-          # "close" is read as teardown.
-          if printf '%s' "$cmdline" \
-            | grep -qE '^[[:space:]]*@?seidroid[[:space:]]+review[[:space:]]+close([[:space:]]|$)'; then
-            echo "command=close" >> "$GITHUB_OUTPUT"
-          else
-            echo "command=review" >> "$GITHUB_OUTPUT"
-          fi
-          # The comment id is passed as --trigger-id, which only labels this
-          # dispatch in the logs. The pull request, not the comment, is the
-          # session key — so any dispatch adopts that PR's session and drives a
-          # fresh review turn on the current tree.
-          echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"
+          {
+            echo "should_run=true"
+            echo "pr_number=$PR_NUMBER"
+            # The comment id is passed as --trigger-id, which only labels this
+            # dispatch in the logs. The pull request, not the comment, is the
+            # session key — so any dispatch adopts that PR's session and drives a
+            # fresh review turn on the current tree.
+            echo "comment_id=$COMMENT_ID"
+          } >> "$GITHUB_OUTPUT"
 
       # Only reached once the command itself parsed, so a comment that says
       # nothing does not mint a token or call the API.
@@ -599,22 +610,16 @@ jobs:
           GH_TOKEN: ${{ steps.identity.outputs.token }}
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
           SKIP_LABEL: ${{ inputs.skip-review-label }}
-          # Which halves of the App credential the caller set. The label check below
-          # reads them to tell a caller that configured no App from one that
-          # configured half of it; the two deserve different answers.
-          APP_ID_PRESENT: ${{ secrets.SEIDROID_APP_ID != '' }}
-          APP_KEY_PRESENT: ${{ secrets.SEIDROID_APP_PRIVATE_KEY != '' }}
           ACTOR: ${{ github.event.comment.user.login }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.parse.outputs.pr_number }}
           PARSED: ${{ steps.parse.outputs.should_run }}
-          COMMAND: ${{ steps.parse.outputs.command }}
           EVENT_NAME: ${{ github.event_name }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
           ACTION: ${{ github.event.action }}
           RE_REVIEW_ON_PUSH: ${{ inputs.re-review-on-push }}
-          # What the CALLER routed this dispatch as. The fork check below gates on
-          # this rather than on COMMAND above, and states why.
+          # What the CALLER routed this dispatch as. The fork check and the label
+          # check below both gate on it, and the fork check states why.
           MODE: ${{ inputs.mode }}
           # The pull_request payload's own repository ids, which spare that path an
           # API call. Empty on every other event, where the API answers instead.
@@ -622,9 +627,9 @@ jobs:
           BASE_REPO_ID: ${{ github.event.pull_request.base.repo.id }}
           # The App identity where a caller configured one, this workflow's own
           # token where it did not. Named apart from GH_TOKEN above, because the
-          # team check has no such fallback. Reading an organisation's teams needs
-          # an identity that can see them, and GITHUB_TOKEN cannot. The reads below
-          # need no more than pull-requests: read.
+          # team check has no such fallback. Reading an organisation's teams takes
+          # "Members" organization permissions, which a GITHUB_TOKEN cannot carry.
+          # The reads below need no more than pull-requests: read.
           GATE_TOKEN: ${{ steps.identity.outputs.token || github.token }}
         run: |
           set -uo pipefail
@@ -645,8 +650,8 @@ jobs:
             deny "$REPO#$PR is a draft; not reviewing"
           fi
 
-          # Membership is a security control, so it fails closed: asked for and
-          # unanswerable means denied. The job condition has already required an
+          # Membership is a security control, so it fails closed: empty, malformed
+          # and unanswerable all deny. The job condition has already required an
           # OWNER/MEMBER/COLLABORATOR association, which admits any collaborator on
           # the repository the request was made in; a team narrows that.
           #
@@ -654,12 +659,21 @@ jobs:
           # An automatic run has no commander: applying the team check there would
           # silently stop reviewing every pull request opened by anyone outside the
           # team, which is the opposite of what a caller sets this input for.
-          if [ "$EVENT_NAME" != "pull_request" ] && [ -n "$ALLOWED_TEAM" ]; then
+          #
+          # It stops a REVIEW, not a teardown, for the reason the label check below
+          # states. Any collaborator the job condition admits may reclaim a sandbox,
+          # whether or not they are on the team, because the alternative is a sandbox
+          # nothing reclaims.
+          #
+          # Reading an organisation's teams needs the App identity, so a caller that
+          # configures no App is refused here. The notice says so, and names the one
+          # thing that fixes it.
+          if [ "$EVENT_NAME" != "pull_request" ] && [ "$MODE" != "close" ]; then
             case "$ALLOWED_TEAM" in
               */*) ;;
-              *) deny "allowed-team is not org/team-slug; denying" ;;
+              *) deny "allowed-team is empty or is not org/team-slug; denying" ;;
             esac
-            [ -n "${GH_TOKEN:-}" ] || deny "no identity to check ${ALLOWED_TEAM} with; denying"
+            [ -n "${GH_TOKEN:-}" ] || deny "this run holds no App identity, so it cannot read membership of $ALLOWED_TEAM; denying. Pass SEIDROID_APP_ID and SEIDROID_APP_PRIVATE_KEY to this workflow. An automatic pull_request review and @seidroid review close do not reach this check"
             state="$(gh api "orgs/${ALLOWED_TEAM%%/*}/teams/${ALLOWED_TEAM##*/}/memberships/${ACTOR}"               --jq .state 2>/dev/null || true)"
             [ "$state" = "active" ] || deny "$ACTOR is not an active member of $ALLOWED_TEAM; denying"
           fi
@@ -689,11 +703,12 @@ jobs:
           # It stops a REVIEW, not a teardown, for the reason the label check states. A
           # fork pull request must still be able to reclaim its sandbox.
           #
-          # Keyed on the caller's mode, not on the command this guard parsed. Two readers
-          # derive those two from one comment body, and they can disagree. This guard
-          # accepts a bare `seidroid review close`. A caller matching the documented
-          # `@seidroid` form reads that same comment as a review. Mode decides what the
-          # review job does, so mode is what this gates on.
+          # Keyed on the caller's mode, because the caller is the reader of the comment
+          # body that routes the dispatch. Two readers of one grammar can disagree: this
+          # guard's own parse accepts a bare `seidroid review close`, where a caller
+          # matching the documented `@seidroid` form reads that same comment as a
+          # review. Mode decides what the review job does, so mode is what the checks
+          # here gate on.
           if [ "$MODE" != "close" ]; then
             if [ "$EVENT_NAME" = "pull_request" ]; then
               # An empty BASE id means the payload did not carry the signal, which is
@@ -720,25 +735,28 @@ jobs:
             esac
           fi
 
-          # The label is a convenience rather than a control, so it fails open: it
-          # stops a review someone did not want, and being unable to read it must
-          # not stop every review when no identity is configured.
-          # ...and it stops a REVIEW, not a teardown. A pull request that gains the
-          # label after a session exists must still be able to reclaim its sandbox,
-          # and nothing else will: no lifetime cap, no sweep.
+          # The label stops a REVIEW, not a teardown. A pull request that gains the
+          # label after a session exists must still be able to reclaim its sandbox, and
+          # nothing else will: no lifetime cap, no sweep. Keyed on mode for the reason
+          # the fork check states.
           #
-          # It fails open for a caller that configured no App, and CLOSED for one that
-          # configured half of one. Half a credential mints no token, so the label
-          # cannot be read -- and a caller who set either secret meant to have the
-          # identity that reads it. Failing open there would review a pull request
-          # carrying the label, on the one configuration that cannot notice.
-          if [ "$COMMAND" != "close" ] && [ -n "$SKIP_LABEL" ]; then
-            if [ -n "${GH_TOKEN:-}" ]; then
-              if gh api "repos/$REPO/pulls/$PR" --jq '.labels[].name' 2>/dev/null                  | grep -qxF "$SKIP_LABEL"; then
-                deny "$REPO#$PR carries $SKIP_LABEL; not reviewing"
-              fi
-            elif [ "$APP_ID_PRESENT" = "true" ] || [ "$APP_KEY_PRESENT" = "true" ]; then
-              deny "half of the App credential is set, so $SKIP_LABEL cannot be read on $REPO#$PR; not reviewing. Pass both secrets, or unset the half that is set"
+          # It reads under GATE_TOKEN, so the label bites for a caller that configures
+          # no App. GitHub documents GET /repos/{owner}/{repo}/pulls/{n} as taking
+          # "Pull requests" read or "Contents" read, and this job grants the first.
+          #
+          # It fails CLOSED, like the fork check above and unlike the once-per-PR gate
+          # below. A refusal costs one review, and the notice names the two fixes.
+          # Admitting on a read that did not answer costs the label its meaning, on the
+          # one pull request whose author asked for no review. Anything but a plain
+          # `false` denies.
+          if [ "$MODE" != "close" ] && [ -n "$SKIP_LABEL" ]; then
+            # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+            carries="$(GH_TOKEN="$GATE_TOKEN" \
+              gh api "repos/$REPO/pulls/$PR" \
+              --jq 'any(.labels[]?.name; . == $ENV.SKIP_LABEL)')" \
+              || deny "could not read the labels on $REPO#$PR, so $SKIP_LABEL cannot be ruled out; not reviewing. Grant pull-requests: read on the calling job, or pass SEIDROID_APP_ID and SEIDROID_APP_PRIVATE_KEY"
+            if [ "$carries" != "false" ]; then
+              deny "$REPO#$PR carries $SKIP_LABEL; not reviewing"
             fi
           fi
 
@@ -799,7 +817,7 @@ jobs:
               # a Bot, and a bot that mentions it does not open with it, so
               # neither reads as a verdict.
               #
-              # It fails open, the way the label check above does. A read that
+              # It fails open, where the label check above refuses. A read that
               # fails costs one extra review, and the next push corrects it. A
               # refusal on a signal this step could not read costs the review
               # itself, on a pull request whose author never learns it was
@@ -886,9 +904,11 @@ jobs:
     # event is the trigger — so it runs even though the guard was skipped. always()
     # is required: a skipped dependency would otherwise skip this too.
     #
-    # A close asked for in a COMMENT is a different thing and does need one. It is a
-    # person destroying a session, so it goes through the same team gate the review
-    # does; the only ungated close is the one the platform itself reports.
+    # A close asked for in a COMMENT is a different thing and does need one. The
+    # guard admits it on two things only: the comment grammar it parses, and the
+    # OWNER/MEMBER/COLLABORATOR filter on the job condition. The team, fork and
+    # label checks all exempt a teardown, because a close a check refuses leaves a
+    # sandbox that nothing else reclaims.
     # !cancelled() rather than always(), and the guard's RESULT rather than only its
     # output. always() started this job when the guard had failed -- the secret check
     # is the last thing the guard does, so should_run is already set by then and the
