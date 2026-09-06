@@ -668,6 +668,13 @@ jobs:
           MIN_DRIVER_VERSION: 'v0.14.0'
         run: |
           set -euo pipefail
+          # An input default applies only when the caller omits the key. A caller that
+          # passes the key through from its own optional input sends an empty string,
+          # which reaches go install as a bare trailing @. The floor is the default, so
+          # falling back to it here keeps the two the same value by construction rather
+          # than by the comment below asking.
+          DRIVER_VERSION="${DRIVER_VERSION:-$MIN_DRIVER_VERSION}"
+
           # sei-internal-skills is public, so there is no credential and no
           # GOPRIVATE. The module path below is absolute and did not change when this
           # file moved: the driver stays there.
@@ -720,7 +727,12 @@ jobs:
             echo "::error::driver contract: sei-agent-driver $version has no \`review\` subcommand, which this workflow invokes"
             exit 1
           fi
-          supported="$(printf '%s\n' "$usage" | sed -nE 's/^[[:space:]]+(--[a-z0-9-]+).*/ \1 /p' | tr -d '\n')"
+          # Every long flag the help names, wherever it sits on the line. Anchoring to
+          # the start of the line reads only `  --out string`, and cobra prints a flag
+          # that has a shorthand as `  -o, --out string` -- so adding a shorthand, which
+          # takes nothing away, would report the flag as missing and fail every review.
+          supported="$(printf '%s\n' "$usage" | grep -oE -- '--[a-z0-9-]+' \
+            | sed 's/^/ /; s/$/ /' | tr -d '\n')"
           missing=""
           for flag in --out --findings-out --check-out --close --conversation-context \
                       --guidelines-file --extra-instructions --trigger-id; do
