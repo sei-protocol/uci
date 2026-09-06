@@ -2305,6 +2305,11 @@ jobs:
         # published must not be failed over a thread it could not close: the cost of not
         # closing one is the duplicate this workflow leaves today.
         #
+        # resolveReviewThread is a pull-request operation. GitHub categorises it under
+        # pulls and publishes no permission requirement of its own for it, and this job
+        # grants pull-requests: write. So a refusal names the identity rather than the
+        # thread, and the warning below reports which identity the API refused.
+        #
         # First 100 threads, as the history read takes them. A pull request past that is
         # PLT-1162's.
         if: ${{ inputs.mode == 'review' && !cancelled()
@@ -2326,6 +2331,13 @@ jobs:
           PLACED_UNPLACED: ${{ steps.place.outputs.unplaced }}
         run: |
           set -euo pipefail
+          # What the API said, on one line and bounded. A warning that reports only
+          # "could not be resolved" tells an operator nothing to act on, and the message
+          # is the difference between a thread somebody else already touched and a
+          # credential that cannot do this at all.
+          saidIt() { printf '%s' "${1:-}" | tr '\n\r' '  ' | cut -c1-300; }
+          apiSaid() { saidIt "$(cat "$1" 2>/dev/null)"; }
+
           if [ ! -s "${CHECK:-}" ]; then
             echo "no check file, so nothing names a thread to close"
             exit 0
@@ -2384,8 +2396,8 @@ jobs:
                   }
                 }
               }
-            }' -F owner="$owner" -F name="$name" -F number="$PR" > "$state"; then
-            echo "::warning::the review threads on $REPO#$PR could not be read, so none was closed; the author sees each restated finding twice"
+            }' -F owner="$owner" -F name="$name" -F number="$PR" > "$state" 2> "$state.err"; then
+            echo "::warning::the review threads on $REPO#$PR could not be read as ${REVIEWER_LOGIN:-an unnamed identity}: $(apiSaid "$state.err"); no thread was closed and the author sees each restated finding twice"
             exit 0
           fi
 
@@ -2412,14 +2424,25 @@ jobs:
               fi
               continue
             fi
+            # Both streams are captured, because gh splits a failure across them: the
+            # API's error body goes to stdout and gh's own line to stderr, and either
+            # alone can be the half that says why. Discarded on success.
             # shellcheck disable=SC2016  # $threadId is GraphQL's
-            if gh api graphql -f query='
+            if out="$(gh api graphql -f query='
               mutation($threadId: ID!) {
                 resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
-              }' -F threadId="$id" >/dev/null 2>&1; then
+              }' -F threadId="$id" 2>&1)"; then
               closed=$((closed+1))
             else
-              echo "::warning::review thread $id on $REPO#$PR could not be resolved; it stays open and the author reads this finding twice"
+              echo "::warning::review thread $id on $REPO#$PR was not resolved as ${REVIEWER_LOGIN:-an unnamed identity}: $(saidIt "$out"); it stays open and the author reads this finding twice"
+              # A refusal is about the identity rather than the thread, and which
+              # identity ran decides what to change. An App installation token carries
+              # the App's own permissions and this job's permissions block does not
+              # narrow it; the workflow token carries only what that block granted.
+              case "$out" in
+                *"not accessible by integration"*|*Forbidden*|*"HTTP 403"*|*"must have"*)
+                  echo "::warning::that refusal names the identity, not the thread. $REVIEWER_LOGIN was refused resolveReviewThread on $REPO#$PR: an App identity carries the App installation's permissions, and github-actions carries only what this job's permissions block grants" ;;
+              esac
               failed=$((failed+1))
             fi
           done <<< "$wanted"
