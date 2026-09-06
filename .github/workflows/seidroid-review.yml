@@ -376,13 +376,21 @@ jobs:
     # Set at all because the account default is six hours. The guard only reads
     # API state, so a minute is generous.
     timeout-minutes: 5
-    # Read-only, and only what the once-per-PR gate below reads: the comments on
-    # the pull request, to find a verdict this workflow already posted. The gate
-    # prefers the App identity and falls back to this, so a caller that
-    # configures no App still gets one review per pull request rather than one
-    # per push.
+    # Read-only, and only what the once-per-PR gate below reads. It makes two
+    # reads: a review, to find a standing block, on a pull-requests endpoint; and a
+    # comment, to find a verdict, on the ISSUE comments endpoint. GitHub documents
+    # that second one as taking either permission, so pull-requests alone serves
+    # it. issues: read is granted beside it so the read does not rest on that
+    # alias. A reaction is the stricter case and takes issues alone; the review job
+    # says so where it needs it.
+    #
+    # The gate prefers the App identity and falls back to this, so a caller that
+    # configures no App still gets one review per pull request rather than one per
+    # push. That fallback is why a refused read would cost most here: it fails
+    # open, so a review runs on every push, and only the run log says why.
     permissions:
-      pull-requests: read
+      pull-requests: read   # the reviews the gate reads to find a standing block
+      issues: read          # the comments it reads to find a verdict
     # Runs for an automatic pull_request review, and for any comment-triggered
     # dispatch, review or close. For a comment it decides whether the commenter may
     # command this workflow at all; for an automatic review it decides whether the
@@ -1594,8 +1602,13 @@ jobs:
           #
           # A list this step cannot read is a block it cannot find, which reads the
           # same on the pull request as a block it failed to clear.
+          #
+          # The marker reaches jq through the environment, the way the guard passes
+          # it. A value carrying a quote or a backslash is data to jq here, where
+          # substituting it into the program would make it syntax.
+          # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
           if ! ids="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-                        --jq "[.[] | select(.state == \"CHANGES_REQUESTED\" and ((.body // \"\") | startswith(\"$VERDICT_MARKER\")))] | .[].id")"; then
+                        --jq '[.[] | select(.state == "CHANGES_REQUESTED" and ((.body // "") | startswith($ENV.VERDICT_MARKER)))] | .[].id')"; then
             echo "::error::could not list the reviews to withdraw on $REPO#$PR; an earlier block may still stand and only a human can clear it"
             exit 1
           fi
