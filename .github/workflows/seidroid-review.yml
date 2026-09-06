@@ -404,6 +404,20 @@ permissions: {}
 # reviewed.
 env:
   VERDICT_MARKER: "<!-- seidroid-review -->"
+  # What stamps an inline finding as this tool's, read by every step that has to
+  # recognise one: the step that writes it, the step that reads the history back, and
+  # the step that closes a thread. One value, because a drift between them fails in the
+  # worst direction and with no error -- placement keeps stamping the old marker while
+  # the other two stop matching it, and every finding duplicates again on a green run.
+  #
+  # Beside VERDICT_MARKER rather than in the review job, though only that job reads it.
+  # Two markers in two scopes is how a third one ends up defined somewhere else again.
+  #
+  # Not named MARKER. Two steps below carry a step-level MARKER of their own, holding
+  # the finding marker and the no-verdict marker, and a step-level key shadows this one
+  # silently -- so a bare MARKER here would work today and become a trap for whichever
+  # step later forgot to set its own.
+  FINDING_MARKER: "<!-- seidroid-review:finding -->"
 
 jobs:
   guard:
@@ -1137,6 +1151,36 @@ jobs:
           # Both keys, together, for the reason the guard's mint states.
           repositories: ${{ github.event.repository.name }}
 
+      - name: Name the identity this review posts under
+        # The login every step below compares a comment's author against, so a thread
+        # this tool wrote is told apart from one that merely quotes its marker. One
+        # value, for the reason FINDING_MARKER is one: two steps computing it from
+        # expressions of their own drift, and a drift here reads as a pull request this
+        # reviewer has never touched.
+        #
+        # It cannot ride in the job's env block. That is evaluated before any step runs
+        # and the app slug is a step output, so this exports to $GITHUB_ENV instead and
+        # the steps below read a plain variable.
+        #
+        # Without app credentials the identity step is skipped and every step here falls
+        # back to the workflow's own token, which posts as github-actions.
+        #
+        # continue-on-error, like the other steps that improve publishing without being
+        # allowed to prevent reviewing. Every reader treats an unset value as matching no
+        # author, so a failure here costs the history and the thread closing, and says so
+        # rather than closing the wrong thread.
+        if: ${{ inputs.mode == 'review' && !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          APP_SLUG: ${{ steps.identity.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          login="github-actions[bot]"
+          if [ -n "${APP_SLUG:-}" ]; then login="${APP_SLUG}[bot]"; fi
+          echo "REVIEWER_LOGIN=$login" >> "$GITHUB_ENV"
+          echo "this review reads and posts as $login"
+
       - name: Read the threads this review left before
         id: threads
         # What this reviewer said last time, and what the author said back. Read
@@ -1164,13 +1208,6 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ needs.guard.outputs.pr_number }}
           THREADS: ${{ runner.temp }}/review-prior-threads.json
-          MARKER: "<!-- seidroid-review:finding -->"
-          # Who this reviewer is, as a comment author reads. The app path names the
-          # bot the app mints; without app credentials every step here falls back to
-          # the workflow's own token, and that posts as github-actions.
-          BOT_LOGIN: ${{ steps.identity.outputs.app-slug
-            && format('{0}[bot]', steps.identity.outputs.app-slug)
-            || 'github-actions[bot]' }}
         run: |
           set -euo pipefail
           echo "threads_path=$THREADS" >> "$GITHUB_OUTPUT"
@@ -1208,16 +1245,16 @@ jobs:
           # spliced into it.
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           jq '[ .data.repository.pullRequest.reviewThreads.nodes[]
-                | select((.comments.nodes[0].body // "") | contains($ENV.MARKER))
-                | select((.comments.nodes[0].author.login // "") == $ENV.BOT_LOGIN)
+                | select((.comments.nodes[0].body // "") | contains($ENV.FINDING_MARKER))
+                | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)
                 | { thread_id: (.id // ""),
                     file: (.path // ""),
                     line: (.line // .originalLine // 0),
-                    body: ((.comments.nodes[0].body // "") | sub($ENV.MARKER + "\n*"; "")),
+                    body: ((.comments.nodes[0].body // "") | sub($ENV.FINDING_MARKER + "\n*"; "")),
                     replies: [ .comments.nodes[1:][] | "\(.author.login // "someone"): \(.body)" ],
                     resolved: .isResolved } ]' "$THREADS.raw" > "$THREADS"
           carried="$(jq length "$THREADS")"
-          echo "carrying $carried prior finding(s) written by $BOT_LOGIN into this review"
+          echo "carrying $carried prior finding(s) written by $REVIEWER_LOGIN into this review"
 
           # A marked thread that the login test drops is worth a line, because the two
           # ways to get here look identical from the outside: this reviewer has left
@@ -1226,10 +1263,10 @@ jobs:
           # history and its ability to close a single thread.
           # shellcheck disable=SC2016  # $ENV is jq's
           marked="$(jq '[ .data.repository.pullRequest.reviewThreads.nodes[]
-                          | select((.comments.nodes[0].body // "") | contains($ENV.MARKER))
+                          | select((.comments.nodes[0].body // "") | contains($ENV.FINDING_MARKER))
                         ] | length' "$THREADS.raw")"
           if [ "$marked" -gt 0 ] && [ "$carried" -eq 0 ]; then
-            echo "::warning::$marked thread(s) on $REPO#$PR carry this tool's marker and none was written by $BOT_LOGIN, so this review carries no history and can close no thread"
+            echo "::warning::$marked thread(s) on $REPO#$PR carry this tool's marker and none was written by ${REVIEWER_LOGIN:-nobody this run could name}, so this review carries no history and can close no thread"
           fi
 
       - name: Record the commit under review
@@ -1384,9 +1421,6 @@ jobs:
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           FINDINGS: ${{ steps.drive.outputs.findings_path }}
-          # Marks every inline comment as this tool's, so a reader can tell an
-          # review note from ai-review's and a later run can find its own.
-          MARKER: "<!-- seidroid-review:finding -->"
           # Findings that reached neither a line nor a file, collected for the
           # summary. Declared here so the step below can read it by output.
           NOTE: ${{ runner.temp }}/review-unplaced.md
@@ -1423,7 +1457,7 @@ jobs:
           while IFS=$'\t' read -r path line side severity detail_b64; do
             [ -z "$path" ] && continue
             detail="$(printf '%s' "$detail_b64" | base64 --decode)"
-            body="$MARKER"$'\n'"**${severity}** — ${detail}"
+            body="$FINDING_MARKER"$'\n'"**${severity}** — ${detail}"
             # Guarded on the commit, not left to the API. Without one both calls
             # return 422, and asking twice per finding for that answer spends the
             # rate limit on a result already known before the loop.
@@ -2245,9 +2279,18 @@ jobs:
         #
         # Two lists, two gates. `addressed` is a finding the diff no longer shows, so it
         # closes whenever the review published. `superseded` is a finding restated as a
-        # new comment, so it closes only once a comment reached the code -- a thread shut
-        # behind a comment that never posted takes a live finding off the pull request
-        # and puts nothing where it was.
+        # new comment, so it closes only once every comment reached the code -- a thread
+        # shut behind a comment that never posted takes a live finding off the pull
+        # request and puts nothing where it was.
+        #
+        # That second gate is per REVIEW, not per thread, and the residual is worth
+        # knowing. It reads the placement counts, which say how many comments landed and
+        # how many did not; it cannot say which comment was the replacement for which
+        # thread, because neither the findings file nor check.json carries that link. So
+        # it demands that placement dropped nothing at all: one unplaced comment holds
+        # every superseded thread open, including the ones whose replacement did post.
+        # Erring that way costs a duplicate thread, and the other way costs a live
+        # finding. A per-thread gate needs the driver to carry the link.
         #
         # Last of the publishers, so nothing old closes before the new review is on the
         # pull request.
@@ -2276,14 +2319,11 @@ jobs:
           # run. An older driver writes no `threads` key, and this step then closes
           # nothing -- which is what the workflow did before it could.
           CHECK: ${{ steps.drive.outputs.check_path }}
-          MARKER: "<!-- seidroid-review:finding -->"
-          BOT_LOGIN: ${{ steps.identity.outputs.app-slug
-            && format('{0}[bot]', steps.identity.outputs.app-slug)
-            || 'github-actions[bot]' }}
-          # What placement managed. A superseded thread closes only when its replacement
-          # is one of these.
+          # What placement managed, and what it could not place. A superseded thread
+          # closes only when comments reached the code and none was left over.
           PLACED_ON_LINE: ${{ steps.place.outputs.on_line }}
           PLACED_ON_FILE: ${{ steps.place.outputs.on_file }}
+          PLACED_UNPLACED: ${{ steps.place.outputs.unplaced }}
         run: |
           set -euo pipefail
           if [ ! -s "${CHECK:-}" ]; then
@@ -2300,14 +2340,22 @@ jobs:
           done < <(jq -r '.threads.refused // [] | .[]' "$CHECK")
 
           wanted="$(jq -r '.threads.addressed // [] | .[]' "$CHECK")"
+          # Both halves are required. Counting only what landed lets one unrelated new
+          # finding on a line stand in for three superseded replacements that landed
+          # nowhere -- and those three threads would close with the findings that
+          # replaced them sitting in the summary instead of on the diff.
+          #
+          # The default in ${PLACED_UNPLACED:-1} is deliberate and is not a count. An
+          # absent output means placement did not report, which has to read as "something
+          # may be unplaced" rather than as zero: this gate decides whether a live
+          # finding comes off the pull request, so the unknown falls on the side that
+          # leaves the thread open.
           placed=$(( ${PLACED_ON_LINE:-0} + ${PLACED_ON_FILE:-0} ))
-          if [ "$placed" -gt 0 ]; then
+          held="$(jq -r '.threads.superseded // [] | length' "$CHECK")"
+          if [ "$placed" -gt 0 ] && [ "${PLACED_UNPLACED:-1}" -eq 0 ]; then
             wanted="$wanted"$'\n'"$(jq -r '.threads.superseded // [] | .[]' "$CHECK")"
-          else
-            held="$(jq -r '.threads.superseded // [] | length' "$CHECK")"
-            if [ "$held" -gt 0 ]; then
-              echo "$held superseded thread(s) stay open: no comment reached the code to replace them"
-            fi
+          elif [ "$held" -gt 0 ]; then
+            echo "$held superseded thread(s) stay open: $placed comment(s) reached the code and ${PLACED_UNPLACED:-an unreported number} could not be placed"
           fi
           wanted="$(printf '%s\n' "$wanted" | sed '/^$/d' | sort -u)"
           if [ -z "$wanted" ]; then
@@ -2347,8 +2395,8 @@ jobs:
           # invented. `open` is the subset there is still something to do to.
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           own='.data.repository.pullRequest.reviewThreads.nodes[]
-                | select((.comments.nodes[0].body // "") | contains($ENV.MARKER))
-                | select((.comments.nodes[0].author.login // "") == $ENV.BOT_LOGIN)'
+                | select((.comments.nodes[0].body // "") | contains($ENV.FINDING_MARKER))
+                | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)'
           ours="$(jq -r "$own | .id" "$state")"
           open="$(jq -r "$own | select(.isResolved | not) | .id" "$state")"
 
