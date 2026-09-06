@@ -13,10 +13,11 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
 # wires that trigger and passes `mode: review`. A MANUAL one runs when a person
 # comments `@seidroid review`. Both spend model quota and hold a sandbox, so both are
-# gated -- see the guard below: the automatic path reviews a pull request once,
-# reviews each later push only where the caller sets `re-review-on-push` or a block
-# of its own stands, refuses a draft and honours the skip-review label; and the
-# manual path additionally checks who is asking.
+# gated -- see the guard below. Both paths refuse a fork-originated pull request. The
+# automatic path reviews a pull request once. It reviews a later push only where the
+# caller sets `re-review-on-push`, or where a block of its own stands. It also refuses
+# a draft and honours the skip-review label. The manual path additionally checks who
+# is asking.
 #
 # This file is the automation of record. It REPLACES `ai-review.yml` rather than
 # running beside it; a repository that wires the automatic path here should retire
@@ -329,14 +330,13 @@ on:
           that capability. That acceptance covers code from inside the
           organisation.
 
-          Fork code sits outside it, and one path still reaches it. A review runs
-          on the repository the pull request is on, and GitHub withholds this
-          workflow's secrets from an automatic fork run. An explicit
-          `@seidroid review` arrives as an issue_comment in the base repository,
-          which does carry the secrets. PLT-1156 is the control that refuses such
-          a request on a fork-originated pull request. It is not in this file yet,
-          so a member who asks for one runs this shell over fork code. Weigh that
-          before you widen or narrow this list.
+          Fork code sits outside that acceptance, and the guard refuses it. An
+          explicit `@seidroid review` arrives as an issue_comment in the base
+          repository, which carries the secrets. That path reaches a fork's code
+          unless something stops it. The guard's fork check is what stops it, on
+          that path and on the automatic one. This shell therefore runs only over
+          code from inside the organisation. Weigh that before you widen or narrow
+          this list.
         required: false
         type: string
         default: 'Bash,Read'
@@ -414,21 +414,26 @@ jobs:
     # Set at all because the account default is six hours. The guard only reads
     # API state, so a minute is generous.
     timeout-minutes: 5
-    # Read-only, and only what the once-per-PR gate below reads. It makes two
-    # reads: a review, to find a standing block, on a pull-requests endpoint; and a
-    # comment, to find a verdict, on the ISSUE comments endpoint. GitHub documents
-    # that second one as taking either permission, so pull-requests alone serves
-    # it. issues: read is granted beside it so the read does not rest on that
-    # alias. A reaction is the stricter case and takes issues alone; the review job
-    # says so where it needs it.
+    # Read-only, and only what the guard's checks read. Three reads share it. The
+    # fork check reads the pull request. The once-per-PR gate reads a review, to find
+    # a standing block, and a comment, to find a verdict.
     #
-    # The gate prefers the App identity and falls back to this, so a caller that
-    # configures no App still gets one review per pull request rather than one per
-    # push. That fallback is why a refused read would cost most here: it fails
-    # open, so a review runs on every push, and only the run log says why.
+    # That second gate read goes to the ISSUE comments endpoint. GitHub documents it
+    # as taking either permission, so pull-requests alone serves it. issues: read is
+    # granted beside it so the read does not rest on that alias. A reaction is the
+    # stricter case and takes issues alone; the review job says so where it needs it.
+    #
+    # Every reader prefers the App identity and falls back to this, so a caller that
+    # configures no App still gets all three. A refused read costs them differently,
+    # and both costs are deliberate. The once-per-PR gate fails open: a review runs on
+    # every push, and only the run log says why. The fork check fails closed: the
+    # guard refuses the review rather than run it over code it cannot place.
+    #
+    # A caller must grant this workflow at least these two, because a reusable
+    # workflow may only downgrade what its caller granted.
     permissions:
-      pull-requests: read   # the reviews the gate reads to find a standing block
-      issues: read          # the comments it reads to find a verdict
+      pull-requests: read   # the pull request the fork check reads, and the gate's reviews
+      issues: read          # the comments the gate reads to find a verdict
     # Runs for an automatic pull_request review, and for any comment-triggered
     # dispatch, review or close. For a comment it decides whether the commenter may
     # command this workflow at all; for an automatic review it decides whether the
@@ -438,9 +443,8 @@ jobs:
     #
     # The pull_request branch carries no author-association check, matching the path
     # this file replaces: the event is the push itself rather than a person's
-    # command, and GitHub withholds this workflow's secrets from a fork pull request
-    # regardless -- such a run fails the machine-client check below and reviews
-    # nothing, rather than running an agent over unauthorised code.
+    # command. The fork check in `Admit the request` refuses code from outside the
+    # organisation, on this path as well as the comment path.
     if: >-
       ${{ (github.event_name == 'pull_request' && inputs.mode == 'review') ||
       (github.event_name == 'issue_comment' &&
@@ -578,11 +582,18 @@ jobs:
           IS_DRAFT: ${{ github.event.pull_request.draft }}
           ACTION: ${{ github.event.action }}
           RE_REVIEW_ON_PUSH: ${{ inputs.re-review-on-push }}
+          # What the CALLER routed this dispatch as. The fork check below gates on
+          # this rather than on COMMAND above, and states why.
+          MODE: ${{ inputs.mode }}
+          # The pull_request payload's own repository ids, which spare that path an
+          # API call. Empty on every other event, where the API answers instead.
+          HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          BASE_REPO_ID: ${{ github.event.pull_request.base.repo.id }}
           # The App identity where a caller configured one, this workflow's own
-          # token where it did not. Named apart from GH_TOKEN above because the
-          # team check has no such fallback: reading an organisation's teams
-          # needs an identity that can see them, and GITHUB_TOKEN cannot, where
-          # reading the comments below needs no more than pull-requests: read.
+          # token where it did not. Named apart from GH_TOKEN above, because the
+          # team check has no such fallback. Reading an organisation's teams needs
+          # an identity that can see them, and GITHUB_TOKEN cannot. The reads below
+          # need no more than pull-requests: read.
           GATE_TOKEN: ${{ steps.identity.outputs.token || github.token }}
         run: |
           set -uo pipefail
@@ -620,6 +631,62 @@ jobs:
             [ -n "${GH_TOKEN:-}" ] || deny "no identity to check ${ALLOWED_TEAM} with; denying"
             state="$(gh api "orgs/${ALLOWED_TEAM%%/*}/teams/${ALLOWED_TEAM##*/}/memberships/${ACTOR}"               --jq .state 2>/dev/null || true)"
             [ "$state" = "active" ] || deny "$ACTOR is not an active member of $ALLOWED_TEAM; denying"
+          fi
+
+          # A fork pull request carries code from outside the organisation. A review
+          # clones that code into a sandbox. That sandbox holds a live App credential
+          # and a shell. Both paths refuse it. ai-review.yml refuses the comment path in
+          # the same words.
+          #
+          # The automatic path needs this as much as the comment path. GitHub withholds
+          # this workflow's secrets from a fork pull_request run by default. The
+          # machine-client check below then fails such a run. A private or internal
+          # repository can turn that withholding off, per repository or by organisation
+          # policy. This check does not rest on a setting nobody here controls.
+          #
+          # A pull_request payload carries both repository ids, so that path spends no
+          # API call. An issue_comment payload carries no head repository, so the API
+          # answers there. Repository ids, not names, so a rename does not read as a
+          # fork. A null head repository reads as a fork, which is the safe reading.
+          #
+          # This check fails closed, unlike the label check below. Only a definite "same"
+          # admits, so an unreadable origin refuses. A failed read costs one refused
+          # review a person can retry. Admitting on a signal nobody could read costs the
+          # sandbox above. The step runs without -e, so a failed read leaves the variable
+          # empty. The API's own error goes to the log, where it says why.
+          #
+          # It stops a REVIEW, not a teardown, for the reason the label check states. A
+          # fork pull request must still be able to reclaim its sandbox.
+          #
+          # Keyed on the caller's mode, not on the command this guard parsed. Two readers
+          # derive those two from one comment body, and they can disagree. This guard
+          # accepts a bare `seidroid review close`. A caller matching the documented
+          # `@seidroid` form reads that same comment as a review. Mode decides what the
+          # review job does, so mode is what this gates on.
+          if [ "$MODE" != "close" ]; then
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              # An empty BASE id means the payload did not carry the signal, which is
+              # the same standing as a read that failed. It must not compare equal to an
+              # empty HEAD id and admit.
+              if [ -z "$BASE_REPO_ID" ]; then
+                origin=unreadable
+              elif [ "$HEAD_REPO_ID" = "$BASE_REPO_ID" ]; then
+                origin=same
+              else
+                origin=fork
+              fi
+              refusal="$REPO#$PR is fork-originated; not reviewing it"
+            else
+              origin="$(GH_TOKEN="$GATE_TOKEN" gh api "repos/$REPO/pulls/$PR" \
+                --jq 'if .head.repo.id != null and .head.repo.id == .base.repo.id then "same" else "fork" end' \
+                || true)"
+              refusal="explicit re-reviews are disabled for fork-originated pull requests; not reviewing $REPO#$PR"
+            fi
+            case "$origin" in
+              same) ;;
+              fork) deny "$refusal" ;;
+              *) deny "could not read where $REPO#$PR comes from, so a fork cannot be ruled out; not reviewing it" ;;
+            esac
           fi
 
           # The label is a convenience rather than a control, so it fails open: it
@@ -740,8 +807,13 @@ jobs:
       #
       # Only ever tests emptiness -- the value is never echoed, compared against a
       # literal, or written to an output.
+      #
+      # Reads the verdict as well as the parse. `deny` exits 0, so every step after it
+      # still runs. A refused request needs no credential, and a fork pull_request run
+      # holds none: without the verdict here, refusing one would paint a deliberate
+      # refusal red and name a caller misconfiguration that does not exist.
       - name: Require the machine-client secret
-        if: steps.parse.outputs.should_run == 'true'
+        if: steps.parse.outputs.should_run == 'true' && steps.admit.outputs.admit == 'true'
         env:
           SECRET_PRESENT: ${{ secrets.OMNIGENT_MACHINE_CLIENT_SECRET != '' }}
         run: |
