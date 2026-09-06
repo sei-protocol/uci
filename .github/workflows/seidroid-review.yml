@@ -1442,8 +1442,8 @@ jobs:
           # whether the review reached the pull request.
           #
           # A repository that also runs ai-review.yml under this App gets two checks
-          # called `AI Review` on the commit. GitHub keeps both. The checks list and
-          # the merge gate read the one that completed last.
+          # called `AI Review` on the commit. GitHub keeps both and lists one: the one
+          # that completed last. The two publishes therefore race for the name.
           if publish "AI Review"; then
             names="check runs review and AI Review"
           else
