@@ -347,10 +347,15 @@ jobs:
             | grep -m1 -E '^[[:space:]]*@?seidroid[[:space:]]+review([[:space:]]+close)?[[:space:]]*$' || true)"
           if [ -z "$cmdline" ]; then
             # A review runs only on the repository the pull request is on, so a
-            # request that names a repository is refused by name. Silence is not
-            # available here: ai-assistant.yml reserves the bare command only, so
-            # every other @seidroid body reaches the conversational assistant, and a
-            # chatty answer to this reads as a review that ran somewhere.
+            # request that names a repository is named in this run's log. That is all
+            # this does: an issue_comment run attaches to no pull request, so the
+            # annotation reaches whoever opens the run and nobody else, and
+            # ai-assistant.yml still answers the body conversationally, because its
+            # reservation is the bare command alone. Both match ai-review, where the
+            # target form was never a review command either.
+            #
+            # It earns its line by naming the reason in the one place a person
+            # debugging "why did my request do nothing" will look.
             #
             # notice, not error, because a denied request is a notice throughout
             # ai-review: an unauthorised actor, an unlisted bot, a draft and an empty
