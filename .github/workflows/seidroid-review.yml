@@ -134,7 +134,8 @@ on:
           Set this false where the repository still runs `ai-review.yml` AND a rule
           names `AI Review`. Both tools then publish that name, GitHub lists only the
           check run that completed last, and this copy can hide the incumbent's
-          verdict.
+          verdict. This switch does not remove that race. It gives the caller the
+          choice to accept it or to stand the copy down.
         required: false
         type: boolean
         default: true
