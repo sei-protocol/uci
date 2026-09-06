@@ -413,10 +413,10 @@ env:
   # Beside VERDICT_MARKER rather than in the review job, though only that job reads it.
   # Two markers in two scopes is how a third one ends up defined somewhere else again.
   #
-  # Not named MARKER. Two steps below carry a step-level MARKER of their own, holding
-  # the finding marker and the no-verdict marker, and a step-level key shadows this one
-  # silently -- so a bare MARKER here would work today and become a trap for whichever
-  # step later forgot to set its own.
+  # Not named MARKER. One step below still carries a step-level MARKER of its own, for
+  # the no-verdict notice, and a step-level key shadows a workflow-level one silently --
+  # so a bare MARKER here would work today and become a trap for whichever step later
+  # forgot to set its own.
   FINDING_MARKER: "<!-- seidroid-review:finding -->"
 
 jobs:
@@ -1254,7 +1254,7 @@ jobs:
                     replies: [ .comments.nodes[1:][] | "\(.author.login // "someone"): \(.body)" ],
                     resolved: .isResolved } ]' "$THREADS.raw" > "$THREADS"
           carried="$(jq length "$THREADS")"
-          echo "carrying $carried prior finding(s) written by $REVIEWER_LOGIN into this review"
+          echo "carrying $carried prior finding(s) written by ${REVIEWER_LOGIN:-nobody this run could name} into this review"
 
           # A marked thread that the login test drops is worth a line, because the two
           # ways to get here look identical from the outside: this reviewer has left
@@ -2441,7 +2441,7 @@ jobs:
               # narrow it; the workflow token carries only what that block granted.
               case "$out" in
                 *"not accessible by integration"*|*Forbidden*|*"HTTP 403"*|*"must have"*)
-                  echo "::warning::that refusal names the identity, not the thread. $REVIEWER_LOGIN was refused resolveReviewThread on $REPO#$PR: an App identity carries the App installation's permissions, and github-actions carries only what this job's permissions block grants" ;;
+                  echo "::warning::that refusal names the identity, not the thread. ${REVIEWER_LOGIN:-the identity this run used} was refused resolveReviewThread on $REPO#$PR: an App identity carries the App installation's permissions, and github-actions carries only what this job's permissions block grants" ;;
               esac
               failed=$((failed+1))
             fi
