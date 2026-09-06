@@ -591,7 +591,10 @@ jobs:
       # because a reaction did not post would trade the whole job for the
       # signal that the job started.
       - name: Acknowledge the trigger
-        if: ${{ needs.guard.outputs.comment_id != '' }}
+        # A review turn, and a comment to react to. `Answer the request` withdraws this
+        # reaction and it runs on the same two facts, so a mode it skips must not react
+        # here: a close would leave eyes that nothing clears.
+        if: ${{ inputs.mode == 'review' && needs.guard.outputs.comment_id != '' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
