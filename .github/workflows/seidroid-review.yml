@@ -1144,7 +1144,8 @@ jobs:
             | sed 's/^/ /; s/$/ /' | tr -d '\n')"
           missing=""
           for flag in --out --findings-out --check-out --close --conversation-context \
-                      --guidelines-file --extra-instructions --trigger-id; do
+                      --guidelines-file --extra-instructions --include-nits \
+                      --trigger-id; do
             case "$supported" in (*" $flag "*) ;; (*) missing="$missing $flag" ;; esac
           done
           if [ -n "$missing" ]; then
@@ -1375,10 +1376,15 @@ jobs:
           # A label that is absent and a read that failed both leave nits off, so the
           # warning below is the only thing that tells them apart in the log. It is
           # where a polish pass that was asked for and did not happen is explained.
+          #
+          # Off, and not a refusal, because this label asks for advice rather than
+          # withholding work. The guard refuses on a signal it could not read, because
+          # admitting there runs a review it should not have run. Admitting here runs
+          # the review that was asked for, carrying one fewer kind of finding.
           read_ok=true
           # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
           carries="$(gh api "repos/$REPO/pulls/$PR" \
-            --jq 'any(.labels[].name; . == $ENV.NITPICK_LABEL)')" || read_ok=false
+            --jq 'any(.labels[]?.name; . == $ENV.NITPICK_LABEL)')" || read_ok=false
           if [ "$read_ok" = "false" ]; then
             echo "::warning::could not read the labels on $REPO#$PR, so $NITPICK_LABEL cannot be found; this review runs without nits"
           fi
