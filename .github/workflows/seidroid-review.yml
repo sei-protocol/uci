@@ -7,8 +7,8 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # through the `driver-version` default. A thin caller in the reviewed repo wires the
 # triggers and calls this with `uses:`. Flow: comment `@seidroid review` on a pull
 # request -> guard gate -> install and run the driver over one managed omnigent
-# session -> post the verdict as a new comment, the findings it can place, and a
-# check run.
+# session -> post the verdict as a new comment, the findings it can place, and its
+# check runs.
 #
 # TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
 # wires that trigger and passes `mode: review`. A MANUAL one runs when a person
@@ -122,6 +122,22 @@ on:
         required: false
         type: boolean
         default: false
+      publish-ai-review-check:
+        description: >-
+          Publish the review's check run a second time, under the name `AI Review`.
+          On by default. A branch-protection rule matches a check by its name, the
+          rules on a calling repository are org-level, and no token here reads them.
+          A repository that retires `ai-review.yml` under a rule that names
+          `AI Review` waits forever on a check nothing publishes. That rule reads as
+          pending, not failed.
+
+          Set this false where the repository still runs `ai-review.yml` AND a rule
+          names `AI Review`. Both tools then publish that name, GitHub lists only the
+          check run that completed last, and this copy can hide the incumbent's
+          verdict.
+        required: false
+        type: boolean
+        default: true
       skip-review-label:
         description: >-
           A label on the reviewed pull request that stops the review. Empty
@@ -838,7 +854,7 @@ jobs:
     permissions:
       pull-requests: write   # post the verdict comment and the review position
       contents: read         # read PR metadata
-      checks: write          # publish the review check run
+      checks: write          # publish the review's check runs
       # React to the triggering comment. A reaction on a PR comment goes to the
       # ISSUE comments endpoint, which pull-requests: write does not cover.
       issues: write          # acknowledge the trigger with a reaction
@@ -1347,9 +1363,9 @@ jobs:
           echo "findings: $on_line on a line, $on_file on a file, $unplaced in the summary"
 
       - name: Publish the review check run
-        # The half of a review a reader sees without opening it. The check of record
-        # is named review, and the same verdict goes out under `AI Review` as well,
-        # for the reason the second publish below states.
+        # The half of a review a reader sees without opening it. `review` is the check
+        # of record. The same verdict goes out under `AI Review` too, for the reason
+        # the second publish below states.
         #
         # Whichever check the driver wrote, decided or not. A run that reached no
         # verdict writes one under the title `no verdict`, naming why, and publishing
@@ -1379,6 +1395,7 @@ jobs:
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           CHECK: ${{ steps.drive.outputs.check_path }}
+          AI_REVIEW_COPY: ${{ inputs.publish-ai-review-check }}
           # The one field this step will not read out of the artifact. See below.
           VERDICT_PRODUCED: ${{ steps.drive.outputs.verdict_produced }}
         run: |
@@ -1401,7 +1418,11 @@ jobs:
             echo "::error::the check file on $REPO#$PR carries no conclusion, so there is nothing to publish as the merge gate"
             exit 1
           fi
+          # The same default again. A jq that fails leaves the title empty, and the `//`
+          # above only covers a field that is absent. The summary needs no such line,
+          # because its default is the empty string either way.
           title="$(jq -r '.title // "review"' "$CHECK" || true)"
+          title="${title:-review}"
           summary="$(jq -r '.summary // ""' "$CHECK" || true)"
           # Against the commit the review read, recorded before it started and used
           # as recorded. A check on any other commit attaches this verdict to code the
@@ -1432,10 +1453,10 @@ jobs:
           # The same verdict under the name ai-review.yml publishes. A branch-protection
           # rule matches a check by its name, so only a check called `AI Review`
           # satisfies a rule that requires `AI Review`. The rules on the calling
-          # repositories are org-level, and no token here can read them, so this step
-          # publishes both names and a rule that requires either one passes. Delete this
-          # call once someone who can read those rules confirms that none names
-          # `AI Review`.
+          # repositories are org-level, and no token here can read them. This step
+          # therefore publishes both names, and a rule that requires either one passes.
+          # Delete this call once someone who can read those rules confirms that none
+          # names `AI Review`.
           #
           # Best-effort, and that is the whole difference from the publish above. A
           # failure here warns and the step still succeeds, so the copy never decides
@@ -1443,11 +1464,14 @@ jobs:
           #
           # A repository that also runs ai-review.yml under this App gets two checks
           # called `AI Review` on the commit. GitHub keeps both and lists one: the one
-          # that completed last. The two publishes therefore race for the name.
-          if publish "AI Review"; then
-            names="check runs review and AI Review"
-          else
-            echo "::warning::the AI Review copy of the review check could not be published on $REPO#$PR; review carries the verdict"
+          # that completed last. The two publishes therefore race for the name, and
+          # `publish-ai-review-check` is how such a repository stands this copy down.
+          if [ "${AI_REVIEW_COPY:-}" = "true" ]; then
+            if publish "AI Review"; then
+              names="check runs review and AI Review"
+            else
+              echo "::warning::the AI Review copy of the review check could not be published on $REPO#$PR; review carries the verdict"
+            fi
           fi
           echo "published $names: $conclusion — $title"
 
@@ -1857,6 +1881,9 @@ jobs:
           # the review started; absent only when that read failed, and then the
           # annotation is the only record.
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
+          # Read for the failure check below, which publishes under the same names the
+          # publish step does. One switch drives both, so the set of names matches.
+          AI_REVIEW_COPY: ${{ inputs.publish-ai-review-check }}
           # The notice an earlier no-verdict run left, which this verdict supersedes.
           # Its own name and its own value: a notice that reports no verdict has to be
           # addressable apart from the verdict itself.
@@ -2064,20 +2091,34 @@ jobs:
           echo "--- verdict, unposted ---"
           printf '%s\n' "$body"
           echo "--- end verdict ---"
-          # Under the same name as the check published above, so it supersedes that
-          # conclusion on this commit rather than sitting beside it, and so a later run
-          # that does post clears it. Best-effort: whatever stopped the comment can stop
-          # this too, and then the annotation stands alone.
+          # Under every name the publish step above writes. This conclusion then
+          # supersedes each of them on this commit rather than sitting beside one, and a
+          # later run that does post clears them. A copy left carrying the earlier
+          # conclusion is a rule reading green on a verdict that never arrived.
+          #
+          # `review` goes first and is the check of record. The `AI Review` copy follows
+          # it, under the switch that step reads, so the two publish the same set of
+          # names on both paths.
+          #
+          # Best-effort, both of them: whatever stopped the comment can stop this too,
+          # and then the annotation stands alone.
           if [ -n "${REVIEWED_SHA:-}" ]; then
-            gh api -X POST "repos/$REPO/check-runs" \
-              -f name=review \
-              -f head_sha="$REVIEWED_SHA" \
-              -f status=completed \
-              -f conclusion=failure \
-              -f output[title]="review produced but not published" \
-              -f output[summary]="The review ran and reached a verdict. Posting it to this pull request failed, so the verdict is not here. Read it in the workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-              >/dev/null \
+            fail_check() {
+              gh api -X POST "repos/$REPO/check-runs" \
+                -f name="$1" \
+                -f head_sha="$REVIEWED_SHA" \
+                -f status=completed \
+                -f conclusion=failure \
+                -f output[title]="review produced but not published" \
+                -f output[summary]="The review ran and reached a verdict. Posting it to this pull request failed, so the verdict is not here. Read it in the workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                >/dev/null
+            }
+            fail_check review \
               || echo "::warning::the failure check run could not be posted either; the annotation on this run is the only record"
+            if [ "${AI_REVIEW_COPY:-}" = "true" ]; then
+              fail_check "AI Review" \
+                || echo "::warning::the AI Review copy of the failure check run could not be posted on $REPO#$PR; it still carries this review's earlier conclusion"
+            fi
           else
             echo "::warning::no reviewed commit was recorded, so there is no check run to fail; the annotation on this run is the only record"
           fi
