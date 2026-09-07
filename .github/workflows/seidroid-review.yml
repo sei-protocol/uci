@@ -2521,6 +2521,9 @@ jobs:
           fi
 
       - name: Post the verdict
+        # id: the withdrawal step at the end of this job reads this step's outcome to
+        # decide whether the trigger comment already carries an honest answer.
+        id: verdict
         # Post only when a real verdict was produced, and even when the drive
         # step above exited non-zero -- `!cancelled()` runs on any outcome
         # except the job itself being cancelled (e.g. superseded by a newer
@@ -3184,25 +3187,41 @@ jobs:
         # the older comment by then, and the newer run answers its OWN comment id, so
         # nothing reads the older one again -- it would wear the eyes for good.
         #
-        # It cannot post a thumb, and that is the point of it being a separate step
-        # rather than always() on the step above. It reads no check file, no
-        # verdict_produced and no conclusion, so there is no value a cancellation could
-        # leave populated that would make it state an outcome. A cancelled run publishes
-        # nothing, so any reaction it left would name a verdict that is not on the pull
-        # request.
+        # THIS STEP HAS NO POST. It withdraws, and there is no code path in it that adds
+        # a reaction, so nothing it is told can make it state an outcome. That is what
+        # makes the withdrawal a step of its own rather than always() on `Answer the
+        # request`: that step chooses a reaction from a conclusion, and a cancellation
+        # arriving after the driver finishes leaves check_path and verdict_produced
+        # populated -- so it would read a real conclusion and thumb a review that
+        # published nothing.
         #
-        # LAST in the job, deliberately. A step's condition is evaluated when the step
-        # is reached, so a clear placed earlier is already skipped by the time a
+        # `Post the verdict` decides whether there is anything to withdraw, and the
+        # driver does not. A cancellation can arrive once the verdict is already on the
+        # pull request -- during thread resolution, say -- and the thumb `Answer the
+        # request` posted answers it correctly. Withdrawing it there leaves a published
+        # review with no reaction on the request that asked for it, which reads as never
+        # answered. That is this step's own defect, one window later.
+        #
+        # The posting step's OUTCOME is what separates the two, and it is four words
+        # about another step: success, failure, cancelled or skipped. None of them names
+        # a conclusion. It says whether an answer already stands, never which answer it
+        # would be, so reading it cannot give this step an outcome to state.
+        #
+        # Anything but success withdraws. An outcome this step cannot read therefore
+        # clears, rather than leaving a thumb that stands for a verdict which may not be
+        # on the pull request.
+        #
+        # LAST in the job, deliberately. The runner evaluates a step's condition when it
+        # reaches the step, so a clear placed earlier is already skipped once a
         # cancellation lands on a later one -- and it would leave both the eyes and the
-        # thumb the step above had just posted. From here it also withdraws that thumb,
-        # so a cancellation arriving during or after `Answer the request` heals rather
-        # than leaving a verdict nobody published.
+        # thumb the step above had just posted.
         #
         # cancelled() is only readable in a step or job `if`. It is not available in
         # `env` or `run`, and a workflow carrying it there is rejected, so the job status
         # cannot be handed to a shell and this decision cannot move inside one script.
         if: ${{ inputs.mode == 'review' && cancelled()
-          && needs.guard.outputs.comment_id != '' }}
+          && needs.guard.outputs.comment_id != ''
+          && steps.verdict.outcome != 'success' }}
         continue-on-error: true
         shell: bash
         env:

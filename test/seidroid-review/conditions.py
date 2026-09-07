@@ -17,6 +17,11 @@ so a condition that names none of always/cancelled/failure/success skips a
 cancelled run without saying so.
 
     conditions.py <workflow>
+    conditions.py --select <workflow> <job state> <mode> <comment id> <verdict outcome>
+
+--select names the reaction steps GitHub runs in that state, in job order.
+reactions.sh uses it, so no case there hardcodes which step a state selects and the
+two harnesses cannot drift.
 """
 import re
 import sys
@@ -29,33 +34,53 @@ import yaml
 # verdict_produced, and a cancellation arriving after the driver finishes leaves both
 # populated -- so a run of it on a cancelled job posts a thumb for a verdict that no
 # step published.
+# step -> (job state, mode, comment id, `Post the verdict` outcome) -> does it run?
+#
+# Two invariants live here. `Answer the request` reads check_path and verdict_produced,
+# and a cancellation arriving after the driver finishes leaves both populated -- so a
+# run of it on a cancelled job posts a thumb for a verdict no step published. And the
+# withdrawal must not strip a thumb that answers a verdict which DID publish: a
+# cancellation can arrive after `Post the verdict` upserted the comment, and the
+# trigger comment then carries an honest answer.
 EXPECTED = {
     "Acknowledge the trigger": {
-        ("success", "review", "7"): True,
-        ("failure", "review", "7"): False,
-        ("cancelled", "review", "7"): False,
-        ("success", "review", ""): False,
-        ("success", "close", "7"): False,
+        ("success", "review", "7", ""): True,
+        ("failure", "review", "7", ""): False,
+        ("cancelled", "review", "7", ""): False,
+        ("success", "review", "", ""): False,
+        ("success", "close", "7", ""): False,
     },
     "Answer the request": {
-        ("success", "review", "7"): True,
-        ("failure", "review", "7"): True,
-        ("cancelled", "review", "7"): False,
-        ("success", "review", ""): False,
-        ("success", "close", "7"): False,
-        ("cancelled", "close", "7"): False,
+        ("success", "review", "7", ""): True,
+        ("failure", "review", "7", ""): True,
+        ("cancelled", "review", "7", ""): False,
+        ("cancelled", "review", "7", "success"): False,
+        ("success", "review", "", ""): False,
+        ("success", "close", "7", ""): False,
+        ("cancelled", "close", "7", ""): False,
     },
     "Withdraw the reactions on a cancelled run": {
-        ("success", "review", "7"): False,
-        ("failure", "review", "7"): False,
-        ("cancelled", "review", "7"): True,
-        ("cancelled", "review", ""): False,
-        ("cancelled", "close", "7"): False,
+        # Nothing to withdraw on a run that was not cancelled.
+        ("success", "review", "7", "success"): False,
+        ("failure", "review", "7", "failure"): False,
+        # Cancelled before the verdict published: withdraw.
+        ("cancelled", "review", "7", "skipped"): True,
+        ("cancelled", "review", "7", "cancelled"): True,
+        ("cancelled", "review", "7", "failure"): True,
+        # An outcome this step cannot read clears rather than leaving a thumb.
+        ("cancelled", "review", "7", ""): True,
+        # THE CASE FOR THE LATE WINDOW. The verdict is on the pull request and the
+        # thumb answers it, so the thumb stays.
+        ("cancelled", "review", "7", "success"): False,
+        ("cancelled", "review", "", "skipped"): False,
+        ("cancelled", "close", "7", "skipped"): False,
     },
 }
 
-# What a step is allowed to read. A step that runs on a cancelled job must not be
-# able to reach a conclusion, or a cancelled run can state an outcome.
+# What a step must not be able to reach when it runs on a cancelled job, or a cancelled
+# run can state an outcome. Matched against the WHOLE step rather than its `env` block:
+# an inline ${{ steps.drive.outputs.check_path }} in `run:`, `with:` or `if:` reaches
+# the same value and would otherwise pass unseen.
 CONCLUSION_INPUTS = ("check_path", "verdict_produced")
 
 STATUS_FUNCS = ("always", "cancelled", "failure", "success")
@@ -97,12 +122,15 @@ UNKNOWN = Unknown()
 
 
 class Ctx:
-    def __init__(self, state, mode, comment_id, lenient=False):
+    def __init__(self, state, mode, comment_id, verdict_outcome="", lenient=False):
         self.state = state
         self.lenient = lenient
         self.values = {
             "inputs.mode": mode,
             "needs.guard.outputs.comment_id": comment_id,
+            # One of success, failure, cancelled, skipped, or empty for a step that
+            # never reported. Four words about another step; none of them a conclusion.
+            "steps.verdict.outcome": verdict_outcome,
         }
 
     def func(self, name):
@@ -237,7 +265,35 @@ def stored_condition(raw):
     return f"success() && ({expr})"
 
 
+REACTION_STEPS = (
+    "Acknowledge the trigger",
+    "Answer the request",
+    "Withdraw the reactions on a cancelled run",
+)
+
+
+def load(path):
+    with open(path, encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def select(argv):
+    """Print the reaction steps that run, one per line, in job order."""
+    workflow, state, mode, cid, verdict_outcome = argv
+    steps = {s["name"]: s for s in load(workflow)["jobs"]["review"]["steps"] if "name" in s}
+    for name in REACTION_STEPS:
+        if name not in steps:
+            continue
+        expr = stored_condition(steps[name].get("if", "success()"))
+        ctx = Ctx(state, mode, cid, "" if verdict_outcome == "-" else verdict_outcome)
+        if truthy(Parser(lex(expr), ctx).parse()) is True:
+            print(name)
+    return 0
+
+
 def main():
+    if sys.argv[1] == "--select":
+        return select(sys.argv[2:])
     with open(sys.argv[1], encoding="utf-8") as handle:
         doc = yaml.safe_load(handle)
     steps = {s["name"]: s for s in doc["jobs"]["review"]["steps"] if "name" in s}
@@ -259,9 +315,38 @@ def main():
             continue
         expr = stored_condition(steps[name].get("if", "success()"))
         print(f"== {name}\n   {expr}")
-        for (state, mode, cid), want in cases.items():
-            got = truthy(Parser(lex(expr), Ctx(state, mode, cid)).parse())
-            check(f"{name} / {state} / {mode} / id={cid or 'empty'}", want, got)
+        for (state, mode, cid, vo), want in cases.items():
+            got = truthy(Parser(lex(expr), Ctx(state, mode, cid, vo)).parse())
+            check(
+                f"{name} / {state} / {mode} / id={cid or 'empty'}"
+                f" / verdict={vo or 'unreported'}",
+                want,
+                got,
+            )
+
+    # A `steps.<id>.outcome` read only works when that id exists and belongs to an
+    # EARLIER step. Delete the id and the read is silently empty forever, which sends
+    # the withdrawal down its clearing path on every cancellation -- including the one
+    # where the verdict published and the thumb is honest. The model takes the outcome
+    # as an argument, so nothing above would notice.
+    print("== every steps.<id> a reaction step reads exists, and runs before it")
+    order = [s.get("name") for s in doc["jobs"]["review"]["steps"]]
+    ids = {
+        s["id"]: i
+        for i, s in enumerate(doc["jobs"]["review"]["steps"])
+        if s.get("id")
+    }
+    for name in EXPECTED:
+        if name not in steps:
+            continue
+        reader = order.index(name)
+        for ref in sorted(set(re.findall(r"steps\.([A-Za-z0-9_-]+)\.", str(steps[name].get("if", ""))))):
+            if ref not in ids:
+                check(f"{name} reads steps.{ref}, which is no step's id", True, False)
+            elif ids[ref] > reader:
+                check(f"{name} reads steps.{ref}, which runs later", True, False)
+            else:
+                check(f"{name} reads steps.{ref}", True, True)
 
     # Whatever the table above says, no step that can reach a conclusion may run on a
     # cancelled job. This is the invariant, stated over the file rather than over the
@@ -270,13 +355,15 @@ def main():
     for name, step in steps.items():
         expr = stored_condition(step.get("if", "success()"))
         verdict = truthy(
-            Parser(lex(expr), Ctx("cancelled", "review", "7", lenient=True)).parse()
+            Parser(
+                lex(expr), Ctx("cancelled", "review", "7", lenient=True)
+            ).parse()
         )
         # UNKNOWN counts as "can run": the check must not pass because a term went
         # unmodelled.
         runs = verdict is not False
-        env = " ".join(str(v) for v in (step.get("env") or {}).values())
-        reads = [k for k in CONCLUSION_INPUTS if k in env]
+        haystack = yaml.safe_dump(step, default_flow_style=False)
+        reads = [k for k in CONCLUSION_INPUTS if k in haystack]
         if runs and reads:
             print(f"  FAIL {name} runs on a cancelled run and reads {', '.join(reads)}")
             failed += 1

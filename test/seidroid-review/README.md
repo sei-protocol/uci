@@ -66,17 +66,39 @@ foreign account, no marker, and a marker quoted mid-body.
 the reaction list a comment carries and serves it through the step's own `jq`. Each
 case reports the exact set left on the trigger comment.
 
-Two properties every case holds to. A human's reaction is never withdrawn. Neither is
+No case names the step it runs. `conditions.py --select` names it, from the job state
+and from `Post the verdict`'s outcome, so the two harnesses cannot drift and a case
+cannot quietly stop exercising the step it claims to.
+
+Each case declares **two** job states, because a cancellation has a moment: the state
+the runner reached `Answer the request` in, and the state it reached the withdrawal step
+in. `success>cancelled` is a cancellation that arrived after the answer. The answer step
+then posts its own thumb, so a late-cancellation case proves the outcome through the
+steps rather than placing a reaction by hand.
+
+Three properties every case holds to. A human's reaction is never withdrawn. Neither is
 a reaction of this bot's that no step here chooses, so a `rocket` some other workflow
-left survives.
+left survives. And a thumb that answers a verdict already on the pull request survives a
+later cancellation — withdrawing it would read as never answered.
+
+# The step conditions
 
 `conditions.py` covers what a shell harness cannot see. A step condition decides which
-of these steps runs in which job state, and that is where the cancellation behaviour
-lives: `Answer the request` reads a conclusion and may thumb the request, so it must
-skip a cancelled run, and the withdrawal step must take it. The check is stated over
-the file as well as over a table -- no step that reads `check_path` or
-`verdict_produced` may run on a cancelled job -- so a step added later is covered.
+reaction step runs in which job state, and that is where the cancellation behaviour
+lives. `Answer the request` reads a conclusion and may thumb the request, so it must
+skip a cancelled run. The withdrawal step must take a cancelled run, unless
+`Post the verdict` already completed.
 
 It models the runner's own rule that a condition naming none of
 `always`/`cancelled`/`failure`/`success` is stored as `success() && (...)`, and treats
 any term it does not decide as unknown rather than as false.
+
+Two checks are stated over the file rather than over a table, so a step added later is
+covered:
+
+- No step that can run on a cancelled job may reach `check_path` or
+  `verdict_produced`. The haystack is the whole step, not its `env` block: an inline
+  `${{ steps.drive.outputs.check_path }}` in `run:`, `with:` or `if:` reaches the same
+  value.
+- Every `steps.<id>` a reaction step's condition reads must be a real id on an earlier
+  step. Delete the id and the read is empty forever, with no error anywhere.
