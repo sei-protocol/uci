@@ -81,6 +81,10 @@ run_case() {
   export STUB_LIST=ok STUB_DELETE=ok STUB_POST=ok STUB_ACTOR="$BOT"
   export PATH="$HERE/bin-reactions:$PATH"
   export GH_TOKEN=x REPO=owner/repo TRIGGER_REPO=owner/repo TRIGGER_ID=7
+  # The collection the guard resolved for the object that asked. All three steps read
+  # it, and the last group below is the one that varies it; every case before that is
+  # about what a step leaves on the comment rather than where it reached.
+  export COMMENT_API=issues/comments
   local check_path=""
   if [ "$have_check" = yes ]; then
     printf '{"conclusion":"%s","title":"t"}\n' "$conclusion" > "$CASE/check.json"
@@ -286,6 +290,47 @@ echo "== a close reacts nowhere, so nothing is left to clear =="
 CASE="$HERE/out-reactions/close-mode"; rm -rf "$CASE"; mkdir -p "$CASE"
 check "close selects no step" "" "$($SELECT success close 7 - | paste -sd, -)"
 check "cancelled close selects no step" "" "$($SELECT cancelled close 7 false | paste -sd, -)"
+
+# The trigger's reactions live under a different collection per event, so every step
+# that touches them builds its URL from the guard's comment_api rather than naming one.
+# A step that named one would post the eyes where the answer cannot reach them, or
+# withdraw from a comment that never carried them.
+echo "== every reaction reaches the collection the guard resolved =="
+run_case api-issue "$NONE" success success true success true yes
+check "the answer read the issue collection"  1 \
+  "$(grep -c '^CALL list repos/owner/repo/issues/comments/7/reactions$' "$CASE/calls.log")"
+check "and thumbed there"                     1 \
+  "$(grep -c '^CALL post +1 repos/owner/repo/issues/comments/7/reactions$' "$CASE/calls.log")"
+check "the acknowledgement too"               1 \
+  "$(grep -c '^CALL post eyes repos/owner/repo/issues/comments/7/reactions$' "$CASE/ack-calls.log")"
+run_case api-thread "$NONE" success success true success true yes COMMENT_API=pulls/comments
+check "the answer read the pull collection"   1 \
+  "$(grep -c '^CALL list repos/owner/repo/pulls/comments/7/reactions$' "$CASE/calls.log")"
+check "and thumbed there"                     1 \
+  "$(grep -c '^CALL post +1 repos/owner/repo/pulls/comments/7/reactions$' "$CASE/calls.log")"
+check "the acknowledgement too"               1 \
+  "$(grep -c '^CALL post eyes repos/owner/repo/pulls/comments/7/reactions$' "$CASE/ack-calls.log")"
+check "nothing reached the other one"         0 \
+  "$(cat "$CASE/calls.log" "$CASE/ack-calls.log" | grep -c 'issues/comments')"
+# The withdrawal step, which runs on no path the two cases above take. It only ever
+# reads and deletes, so a wrong collection there is the case where the eyes stay. The
+# acknowledgement seeds the eyes, and the id it lands is the stub's to choose, so the
+# delete is matched on its collection rather than on that id.
+run_case api-withdraw-issue "$NONE" cancelled cancelled false - '' no
+check "the withdrawal read the issue collection" 1 \
+  "$(grep -c '^CALL list repos/owner/repo/issues/comments/7/reactions$' "$CASE/calls.log")"
+check "and deleted the eyes there"            1 \
+  "$(grep -cE '^CALL delete [0-9]+ repos/owner/repo/issues/comments/7/reactions/[0-9]+$' "$CASE/calls.log")"
+check "the comment is clear"                  "" "$(left)"
+run_case api-withdraw-thread "$NONE" cancelled cancelled false - '' no COMMENT_API=pulls/comments
+check "the withdrawal read the pull collection" 1 \
+  "$(grep -c '^CALL list repos/owner/repo/pulls/comments/7/reactions$' "$CASE/calls.log")"
+check "and deleted the eyes there"            1 \
+  "$(grep -cE '^CALL delete [0-9]+ repos/owner/repo/pulls/comments/7/reactions/[0-9]+$' "$CASE/calls.log")"
+check "the comment is clear"                  "" "$(left)"
+check "nothing reached the other one"         0 \
+  "$(cat "$CASE/calls.log" "$CASE/ack-calls.log" | grep -c 'issues/comments')"
+check "and it still posts nothing"            0 "$(calls post)"
 
 echo "== no step made a call the stub does not serve =="
 check "unstubbed calls" 0 \
