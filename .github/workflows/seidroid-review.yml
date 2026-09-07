@@ -2524,8 +2524,8 @@ jobs:
           fi
 
       - name: Post the verdict
-        # id: the withdrawal step at the end of this job reads this step's outcome to
-        # decide whether the trigger comment already carries an honest answer.
+        # id: the withdrawal step at the end of this job reads this step's `posted`
+        # output to decide whether the trigger comment already carries an honest answer.
         id: verdict
         # Post only when a real verdict was produced, and even when the drive
         # step above exited non-zero -- `!cancelled()` runs on any outcome
@@ -2731,6 +2731,13 @@ jobs:
           if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
             posted=true
           fi
+          # Whether the verdict is ON the pull request, for the withdrawal step at the
+          # end of this job: a thumb on the trigger comment answers a verdict only when
+          # the verdict is there to read. This step's exit status cannot carry that. The
+          # failure path below ends on a call whose failure it swallows, so the step
+          # exits 0 whether the comment landed or not, and its outcome reads success
+          # either way.
+          echo "posted=$posted" >> "$GITHUB_OUTPUT"
           if [ "$posted" = true ]; then
             echo "posted the verdict on $REPO#$PR"
             # An earlier run may have left a notice saying this review did not complete.
@@ -3205,15 +3212,20 @@ jobs:
         # review with no reaction on the request that asked for it, which reads as never
         # answered. That is this step's own defect, one window later.
         #
-        # The posting step's OUTCOME is what separates the two, and it is four words
-        # about another step: success, failure, cancelled or skipped. None of them names
-        # a conclusion. It says whether an answer already stands, never which answer it
-        # would be, so reading it cannot give this step an outcome to state. The same
-        # holds for the answer step's outcome, which the withdrawal set below reads.
+        # Its `posted` OUTPUT separates the two, and its outcome does not. That step
+        # tolerates a failed comment POST and ends on a call whose failure it swallows,
+        # so it exits 0 and reads success whether the verdict landed or not. A thumb kept
+        # on that reading would stand for a review nobody can see. The output is written
+        # from the POST's own result.
         #
-        # Anything but success withdraws. An outcome this step cannot read therefore
-        # clears, rather than leaving a thumb that stands for a verdict which may not be
-        # on the pull request.
+        # One boolean about another step, with no conclusion in it. It says whether an
+        # answer already stands, never which answer it would be, so reading it cannot
+        # give this step an outcome to state. The same holds for the answer step's
+        # outcome, which the withdrawal set below reads.
+        #
+        # Anything but a posted verdict withdraws. A value this step cannot read
+        # therefore clears, rather than leaving a thumb that stands for a verdict which
+        # may not be on the pull request.
         #
         # WHAT IT PROTECTS, AND WHERE THAT STOPS. A thumb survives when the verdict it
         # answers is on the pull request AND this run is the run that posted it, or when
@@ -3235,7 +3247,7 @@ jobs:
         # cannot be handed to a shell and this decision cannot move inside one script.
         if: ${{ inputs.mode == 'review' && cancelled()
           && needs.guard.outputs.comment_id != ''
-          && steps.verdict.outcome != 'success' }}
+          && steps.verdict.outputs.posted != 'true' }}
         continue-on-error: true
         shell: bash
         env:

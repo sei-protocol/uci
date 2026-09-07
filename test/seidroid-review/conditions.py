@@ -17,7 +17,7 @@ so a condition that names none of always/cancelled/failure/success skips a
 cancelled run without saying so.
 
     conditions.py <workflow>
-    conditions.py --select <workflow> <job state> <mode> <comment id> <verdict outcome>
+    conditions.py --select <workflow> <job state> <mode> <comment id> <posted>
 
 --select names the reaction steps GitHub runs in that state, in job order.
 reactions.sh uses it, so no case there hardcodes which step a state selects and the
@@ -28,14 +28,15 @@ import sys
 
 import yaml
 
-# step -> (job state, mode, comment id, `Post the verdict` outcome) -> does it run?
+# step -> (job state, mode, comment id, `Post the verdict` posted?) -> does it run?
 #
 # Two invariants live here. `Answer the request` reads check_path and verdict_produced,
 # and a cancellation arriving after the driver finishes leaves both populated -- so a
 # run of it on a cancelled job posts a thumb for a verdict no step published. And the
-# withdrawal must not strip a thumb that answers a verdict which DID publish: a
-# cancellation can arrive after `Post the verdict` upserted the comment, and the
-# trigger comment then carries an honest answer.
+# withdrawal must not strip a thumb that answers a verdict which DID land: a
+# cancellation can arrive after `Post the verdict` posted the comment, and the trigger
+# comment then carries an honest answer. That step's `posted` output is the fact, not
+# its outcome, which reads success even when the POST was refused.
 EXPECTED = {
     "Acknowledge the trigger": {
         ("success", "review", "7", ""): True,
@@ -48,26 +49,24 @@ EXPECTED = {
         ("success", "review", "7", ""): True,
         ("failure", "review", "7", ""): True,
         ("cancelled", "review", "7", ""): False,
-        ("cancelled", "review", "7", "success"): False,
+        ("cancelled", "review", "7", "true"): False,
         ("success", "review", "", ""): False,
         ("success", "close", "7", ""): False,
         ("cancelled", "close", "7", ""): False,
     },
     "Withdraw the reactions on a cancelled run": {
         # Nothing to withdraw on a run that was not cancelled.
-        ("success", "review", "7", "success"): False,
-        ("failure", "review", "7", "failure"): False,
-        # Cancelled before the verdict published: withdraw.
-        ("cancelled", "review", "7", "skipped"): True,
-        ("cancelled", "review", "7", "cancelled"): True,
-        ("cancelled", "review", "7", "failure"): True,
-        # An outcome this step cannot read clears rather than leaving a thumb.
+        ("success", "review", "7", "true"): False,
+        ("failure", "review", "7", "false"): False,
+        # Cancelled before the verdict landed: withdraw.
+        ("cancelled", "review", "7", "false"): True,
+        # A value this step cannot read clears rather than leaving a thumb.
         ("cancelled", "review", "7", ""): True,
         # THE CASE FOR THE LATE WINDOW. The verdict is on the pull request and the
         # thumb answers it, so the thumb stays.
-        ("cancelled", "review", "7", "success"): False,
-        ("cancelled", "review", "", "skipped"): False,
-        ("cancelled", "close", "7", "skipped"): False,
+        ("cancelled", "review", "7", "true"): False,
+        ("cancelled", "review", "", "false"): False,
+        ("cancelled", "close", "7", "false"): False,
     },
 }
 
@@ -116,15 +115,25 @@ UNKNOWN = Unknown()
 
 
 class Ctx:
-    def __init__(self, state, mode, comment_id, verdict_outcome="", lenient=False):
+    def __init__(self, state, mode, comment_id, posted="", lenient=False):
         self.state = state
         self.lenient = lenient
         self.values = {
             "inputs.mode": mode,
             "needs.guard.outputs.comment_id": comment_id,
-            # One of success, failure, cancelled, skipped, or empty for a step that
-            # never reported. Four words about another step; none of them a conclusion.
-            "steps.verdict.outcome": verdict_outcome,
+            # `true` when the verdict comment landed on the pull request, `false` when
+            # the POST was refused, empty when that step never reported. One boolean
+            # about another step, with no conclusion in it.
+            "steps.verdict.outputs.posted": posted,
+            # Modelled BESIDE it, and derived rather than passed, so a condition that
+            # goes back to reading the outcome fails an assertion instead of crashing
+            # this model. `Post the verdict` tolerates a refused POST and ends on a
+            # call whose failure it swallows, so it exits 0 and reads success whenever
+            # it reported at all -- including on a verdict that never landed. That is
+            # why the gate cannot use it.
+            "steps.verdict.outcome": (
+                "success" if posted in ("true", "false") else "skipped"
+            ),
         }
 
     def func(self, name):
@@ -284,13 +293,13 @@ def load(path):
 
 def select(argv):
     """Print the reaction steps that run, one per line, in job order."""
-    workflow, state, mode, cid, verdict_outcome = argv
+    workflow, state, mode, cid, posted = argv
     steps = {s["name"]: s for s in load(workflow)["jobs"]["review"]["steps"] if "name" in s}
     for name in REACTION_STEPS:
         if name not in steps:
             continue
         expr = stored_condition(steps[name].get("if", "success()"))
-        ctx = Ctx(state, mode, cid, "" if verdict_outcome == "-" else verdict_outcome)
+        ctx = Ctx(state, mode, cid, "" if posted == "-" else posted)
         if truthy(Parser(lex(expr), ctx).parse()) is True:
             print(name)
     return 0
@@ -320,11 +329,11 @@ def main():
             continue
         expr = stored_condition(steps[name].get("if", "success()"))
         print(f"== {name}\n   {expr}")
-        for (state, mode, cid, vo), want in cases.items():
-            got = truthy(Parser(lex(expr), Ctx(state, mode, cid, vo)).parse())
+        for (state, mode, cid, posted), want in cases.items():
+            got = truthy(Parser(lex(expr), Ctx(state, mode, cid, posted)).parse())
             check(
                 f"{name} / {state} / {mode} / id={cid or 'empty'}"
-                f" / verdict={vo or 'unreported'}",
+                f" / posted={posted or 'unreported'}",
                 want,
                 got,
             )

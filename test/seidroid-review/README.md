@@ -76,6 +76,12 @@ in. `success>cancelled` is a cancellation that arrived after the answer. The ans
 then posts its own thumb, so a late-cancellation case proves the outcome through the
 steps rather than placing a reaction by hand.
 
+A case's `posted` column is `Post the verdict`'s own output: `true` when its comment
+landed, `false` when the POST was refused, unreported when that step never ran. Not its
+outcome. That step tolerates a refused POST and exits 0 either way, so its outcome reads
+`success` on a verdict that never landed, and a thumb kept on that reading would stand
+for a review nobody can see.
+
 Four properties every case holds to. A human's reaction is never withdrawn. Neither is
 a reaction of this bot's that no step here chooses, so a `rocket` some other workflow
 left survives. A thumb that answers a verdict already on the pull request survives a
