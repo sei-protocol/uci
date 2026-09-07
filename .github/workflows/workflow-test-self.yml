@@ -1,0 +1,32 @@
+name: Workflow tests
+# The shell and jq inside seidroid-review.yml, run against a gh stub. Nothing here
+# reaches the GitHub API, so this needs no token and no permissions.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/seidroid-review.yml'
+      - '.github/workflows/workflow-test-self.yml'
+      - 'test/seidroid-review/**'
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/seidroid-review.yml'
+      - '.github/workflows/workflow-test-self.yml'
+      - 'test/seidroid-review/**'
+permissions:
+  contents: read
+jobs:
+  place-findings:
+    name: Place findings on the code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install the YAML reader
+        run: python3 -m pip install --quiet pyyaml
+      - name: Run the placement harness
+        run: test/seidroid-review/run.sh

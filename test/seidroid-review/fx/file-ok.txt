@@ -1,0 +1,4 @@
+pkg/a.go
+pkg/b.go
+assets/logo.png
+pkg/huge.go

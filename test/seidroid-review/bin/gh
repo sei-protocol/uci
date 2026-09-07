@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# gh stub: logs every call, serves fixture JSON, and decides success per scenario.
+log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
+
+argv=("$@")
+joined="$*"
+
+# --- read the pull request object (base.sha and changed_files) ----------------
+case "$joined" in
+  *"/pulls/$STUB_PR"|*"/pulls/$STUB_PR --jq"*)
+    log "CALL pull"
+    if [ "$STUB_BASE" = "FAIL" ]; then
+      # A failed read answers with the error object, which the step files and reads.
+      printf '%s\n' '{"message":"Not Found","status":"404"}'
+      exit 1
+    fi
+    # NONE serves a response carrying no changed_files, which is the only way the
+    # step reaches its file-count cap test.
+    if [ "${STUB_CHANGED_FILES:-}" = "NONE" ]; then
+      printf '{"number":%s,"base":{"sha":"%s"}}\n' "$STUB_PR" "$STUB_BASE"
+    else
+      printf '{"number":%s,"base":{"sha":"%s"},"changed_files":%s}\n' \
+        "$STUB_PR" "$STUB_BASE" "${STUB_CHANGED_FILES:-4}"
+    fi
+    exit 0
+    ;;
+esac
+
+# --- the diff between two commits ---------------------------------------------
+case "$joined" in
+  *"/compare/"*)
+    # The commit range the step asked for, so a test can assert which one it read.
+    for a in "${argv[@]}"; do case "$a" in *"/compare/"*) range="${a#*/compare/}" ;; esac; done
+    log "CALL compare ${range%%\?*}"
+    if [ "$STUB_FILES" = "FAIL" ]; then
+      printf '%s\n' '{"message":"Not Found","status":"404"}'
+      exit 1
+    fi
+    # One object. compare paginates its commits, and a second page carries no files
+    # key at all, so the step asks for one page and reads its files.
+    fx="$STUB_FILES"
+    case "${range%%\?*}" in
+      *"...$STUB_STALE_SHA") fx="${STUB_FILES_STALE:-$STUB_FILES}" ;;
+    esac
+    cat "$fx"
+    exit 0
+    ;;
+esac
+
+# --- create a review (the batch) ---------------------------------------------
+case "$joined" in
+  *"/reviews"*)
+    n=${#argv[@]}
+    for ((i=0;i<n;i++)); do
+      if [ "${argv[i]}" = "--input" ]; then cp "${argv[i+1]}" "$STUB_REQUEST"; fi
+    done
+    log "CALL reviews"
+    # -i puts the status line first, which is what the step reads the code from.
+    inc=no
+    for a in "${argv[@]}"; do [ "$a" = "-i" ] && inc=yes; done
+    line() { [ "$inc" = yes ] && printf 'HTTP/2.0 %s\r\nContent-Type: application/json\r\n\r\n' "$1"; }
+    case "$STUB_REVIEW" in
+      ok)         line "200 OK";                     printf '%s\n' '{"id":9001,"state":"COMMENTED"}'; exit 0 ;;
+      400)        line "400 Bad Request";            printf '%s\n' '{"message":"Problems parsing JSON"}'; exit 1 ;;
+      403)        line "403 Forbidden";              printf '%s\n' '{"message":"Resource not accessible by integration"}'; exit 1 ;;
+      413)        line "413 Payload Too Large";      printf '%s\n' '{"message":"Body is too long"}'; exit 1 ;;
+      422)        line "422 Unprocessable Entity";   printf '%s\n' '{"message":"Validation Failed","status":"422"}'; exit 1 ;;
+      422nostatus) line "422 Unprocessable Entity";  printf '%s\n' '{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"}]}'; exit 1 ;;
+      500)        line "500 Internal Server Error";  printf '%s\n' '{"message":"Server Error","status":"500"}'; exit 1 ;;
+      502)        line "502 Bad Gateway";            printf '%s\n' '{"message":"Bad Gateway"}'; exit 1 ;;
+      noshape)    exit 1 ;;
+    esac
+    ;;
+esac
+
+# --- create a review comment (the per-finding rungs) -------------------------
+case "$joined" in
+  *"/comments"*)
+    path="" line="" side="" subject=""
+    n=${#argv[@]}
+    for ((i=0;i<n;i++)); do
+      case "${argv[i]}" in
+        path=*)         path="${argv[i]#path=}" ;;
+        line=*)         line="${argv[i]#line=}" ;;
+        side=*)         side="${argv[i]#side=}" ;;
+        subject_type=*) subject="${argv[i]#subject_type=}" ;;
+        body=*)         body="${argv[i]#body=}" ;;
+      esac
+    done
+    printf '%s\n' "${body%%$'\n'*}" >> "$STUB_BODIES"
+    if [ "$subject" = "file" ]; then
+      log "CALL file-comment $path"
+      grep -qxF -- "$path" "$STUB_FILE_OK" && exit 0
+      printf '%s\n' '{"message":"Validation Failed","status":"422"}'
+      exit 1
+    fi
+    log "CALL line-comment $path $side $line"
+    grep -qxF -- "$path	$side	$line" "$STUB_LINE_OK" && exit 0
+    printf '%s\n' '{"message":"Validation Failed","status":"422"}'
+    exit 1
+    ;;
+esac
+
+log "CALL unhandled $joined"
+exit 1
