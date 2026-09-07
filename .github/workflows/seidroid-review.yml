@@ -1614,6 +1614,12 @@ jobs:
         # withdrawal below -- which selects a CHANGES_REQUESTED review whose body
         # opens with VERDICT_MARKER -- does not select it, and the position this run
         # takes stays the position step's alone.
+        #
+        # Each comment's superseded thread ids are recorded as that comment posts, and
+        # the resolve step closes a thread only on finding its id in that record. So a
+        # review superseding three threads closes the ones whose own replacement reached
+        # the code and leaves the rest standing. A comment that degraded to the file rung
+        # counts as a replacement, for the reason that rung gives; the summary does not.
         if: ${{ inputs.mode == 'review' && !cancelled()
           && steps.drive.outputs.verdict_produced == 'true' }}
         continue-on-error: true
@@ -1627,16 +1633,30 @@ jobs:
           # Findings that reached neither a line nor a file, collected for the
           # summary. Declared here so the step below can read it by output.
           NOTE: ${{ runner.temp }}/review-unplaced.md
+          # One superseded thread id per line, appended as the comment replacing it
+          # posts. Declared here so the resolve step can read it by output.
+          LINKAGE: ${{ runner.temp }}/review-superseded-placed.txt
         run: |
           set -euo pipefail
           echo "note_path=$NOTE" >> "$GITHUB_OUTPUT"
           : > "$NOTE"
+          # Emptied before anything is appended. RUNNER_TEMP survives a re-run on a
+          # non-ephemeral self-hosted runner, which is the steady state here, and a
+          # record left by attempt 1 would close a thread on attempt 2's behalf.
+          echo "linkage_path=$LINKAGE" >> "$GITHUB_OUTPUT"
+          : > "$LINKAGE"
           if [ ! -s "$FINDINGS" ]; then
             echo "no findings to place; the summary carries the review"
             # Zero, and not silence. Nothing was placed because there was nothing to
             # place, which is a number the summary can state. A step that was skipped
             # writes nothing at all, and the summary tells the two apart by that.
-            { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"; } >> "$GITHUB_OUTPUT"
+            #
+            # superseded_linked says whether the driver named which comment replaces
+            # which thread, and the resolve step picks its gate on it. Every path that
+            # returns before reading a finding says false, so the answer to a question
+            # this run never asked is the one that keeps a thread open.
+            { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"
+              echo "superseded_linked=false"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # The commit the review read, recorded before it started and used as
@@ -1676,6 +1696,20 @@ jobs:
             return 0
           }
 
+          # The threads one comment replaced, recorded as that comment posts. The resolve
+          # step closes a superseded thread on finding its id here and on nothing else,
+          # so an id written for a comment that did not post takes a live finding off the
+          # pull request. Neither summary collector records: the summary is not the code.
+          #
+          # A dot is a finding that replaces nothing, and no node id can be one -- the
+          # alphabet GitHub mints from has no dot in it. The ids are space-separated and
+          # split back onto their own lines, because the record is read line by line.
+          record_superseded() {
+            [ "$1" = "." ] && return 0
+            printf '%s\n' "$1" | tr ' ' '\n' >> "$LINKAGE"
+            return 0
+          }
+
           # The second rung, one call per finding. A file-level comment is a field
           # the reviews API does not carry, so this one cannot ride in the batch
           # below. The file can still be in the pull request, and a comment on it
@@ -1694,9 +1728,14 @@ jobs:
                  -f commit_id="$head_sha" -f path="$1" \
                  -f subject_type=file >/dev/null 2>&1; then
               on_file=$((on_file+1))
+              # A file comment replaces the thread. It is on the diff, in the file the
+              # reader is already in, and its body carries the cited line. The thread it
+              # replaces is one whose line this diff no longer covers -- which is why
+              # this rung was reached -- so not closing it leaves a duplicate for good.
+              record_superseded "$6"
               return 0
             fi
-            "$6" "$1" "$2" "$3" "$4" "$5"
+            "$7" "$1" "$2" "$3" "$4" "$5" "$6"
             return 0
           }
 
@@ -1708,6 +1747,7 @@ jobs:
                  -f commit_id="$head_sha" -f path="$1" \
                  -F line="$2" -f side="$3" >/dev/null 2>&1; then
               on_line=$((on_line+1))
+              record_superseded "$6"
               return 0
             fi
             on_file_or_summary "$@"
@@ -1718,17 +1758,26 @@ jobs:
           # prose with no line constraint on it, and @tsv escapes a newline, a tab or
           # a backslash into a literal \n, \t or \\ -- so a multi-line detail reached
           # the pull request showing its escape sequences instead of its text. The
-          # four fields that cannot contain a tab stay plain.
-          tsv='[.file, .line, .side, .severity, (.detail | @base64)] | @tsv'
+          # five fields that cannot contain a tab stay plain.
+          #
+          # The supersedes list rides ahead of the detail rather than after it, and the
+          # order the fields are READ in is not the order they are passed in. Only the
+          # last field may be empty; see the reader below. A finding replacing nothing
+          # writes a dot, so the list is never the empty field either.
+          tsv='[.file, .line, .side, .severity,
+                (.supersedes | if length == 0 then "." else join(" ") end),
+                (.detail | @base64)] | @tsv'
           rows() { jq -r "$1 | $tsv" "$2"; }
           # Redirected into, never piped into. The counters the summary reads are
           # this shell's, and a pipe would count them in a subshell that exits.
           place_each() {
-            local placer="$1" summary="$2" path line side severity detail_b64 detail
-            while IFS=$'\t' read -r path line side severity detail_b64; do
+            local placer="$1" summary="$2"
+            local path line side severity supersedes detail_b64 detail
+            while IFS=$'\t' read -r path line side severity supersedes detail_b64; do
               [ -z "$path" ] && continue
               detail="$(printf '%s' "$detail_b64" | base64 --decode)"
-              "$placer" "$path" "$line" "$side" "$severity" "$detail" "$summary"
+              "$placer" "$path" "$line" "$side" "$severity" "$detail" \
+                        "$supersedes" "$summary"
             done
             return 0
           }
@@ -1743,6 +1792,13 @@ jobs:
           # and the record then reads one field short: the severity arrives in the
           # side, the base64 detail arrives in the severity, and a finding reaches the
           # pull request with its own encoding printed as its severity.
+          #
+          # supersedes is the threads this finding's comment replaces. The driver admits
+          # every id against the threads it was handed, and this admits the SHAPE again:
+          # the record is read line by line and each id is matched whole, so an id
+          # carrying a space or a newline would split into two the resolve step then
+          # cannot find. Dropping one leaves its thread open, which is the safe end.
+          # A driver that publishes no linkage yields the empty list on every finding.
           normalise='[ .[] | { file: (.file | tostring),
                                line: (.line | if type == "number" then floor
                                               elif type == "string" then ((. | tonumber?) // 0 | floor)
@@ -1751,13 +1807,26 @@ jobs:
                                       | if . == "LEFT" then "LEFT" else "RIGHT" end),
                                severity: (.severity | tostring
                                           | if . == "" then "note" else . end),
+                               supersedes: [ (.supersedes // [])[]
+                                             | select(type == "string")
+                                             | select(test("^[A-Za-z0-9_=+/-]{1,200}$")) ],
                                detail: (.detail | tostring) }
                       | select(.file != "") ]'
           normal="$RUNNER_TEMP/review-findings-normalised.json"
           if ! jq "$normalise" "$FINDINGS" > "$normal"; then
             echo "::warning::the findings file for $REPO#$PR could not be read, so this review places nothing on the diff"
-            { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"; } >> "$GITHUB_OUTPUT"
+            { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"
+              echo "superseded_linked=false"; } >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # One finding naming a thread is the whole test. An older driver publishes the
+          # key on none of them, and a review that supersedes nothing publishes it on
+          # none either -- and in that case there is no superseded thread for either gate
+          # to decide, so the two answers are the same one.
+          if jq -e 'any(.[]; (.supersedes | length) > 0)' "$normal" >/dev/null; then
+            echo "superseded_linked=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "superseded_linked=false" >> "$GITHUB_OUTPUT"
           fi
 
           # Which lines a comment can name, walked out of the diff the fetch below
@@ -1913,6 +1982,9 @@ jobs:
               # landed, so it is the case that must not be repeated.
               if gh api -i -X POST "repos/$REPO/pulls/$PR/reviews" --input "$request" > "$response"; then
                 on_line=$((on_line + anchored))
+                # The call carries every anchored comment and creates all of them or
+                # none, so one write records the whole batch's linkage.
+                jq -r '.anchored[] | .supersedes[]' "$placement" >> "$LINKAGE"
                 echo "posted one review carrying $anchored comment(s) on $REPO#$PR"
               else
                 status="$(sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' "$response" || true)"
@@ -2735,18 +2807,23 @@ jobs:
         #
         # Two lists, two gates. `addressed` is a finding the diff no longer shows, so it
         # closes whenever the review published. `superseded` is a finding restated as a
-        # new comment, so it closes only once every comment reached the code -- a thread
-        # shut behind a comment that never posted takes a live finding off the pull
-        # request and puts nothing where it was.
+        # new comment, so it closes only once the comment restating IT reached the code
+        # -- a thread shut behind a comment that never posted takes a live finding off
+        # the pull request and puts nothing where it was.
         #
-        # That second gate is per REVIEW, not per thread, and the residual is worth
-        # knowing. It reads the placement counts, which say how many comments landed and
-        # how many did not; it cannot say which comment was the replacement for which
-        # thread, because neither the findings file nor check.json carries that link. So
-        # it demands that placement dropped nothing at all: one unplaced comment holds
-        # every superseded thread open, including the ones whose replacement did post.
-        # Erring that way costs a duplicate thread, and the other way costs a live
-        # finding. A per-thread gate needs the driver to carry the link.
+        # That second gate is per THREAD. Each finding names the threads its comment
+        # replaces, placement records those ids as the comment posts, and a thread here
+        # closes on finding its id in that record. So a review superseding three threads
+        # closes the one whose replacement reached the code and leaves the other two
+        # standing beside the findings that restate them.
+        #
+        # A driver that publishes no linkage falls back to the per-review gate: every
+        # superseded thread together, and only when placement dropped nothing at all.
+        # Coarse in the safe direction -- one unplaced comment holds all of them open --
+        # and placement's superseded_linked output is what selects between the two.
+        #
+        # The record is what a comment DID, and `addressed` is what publication alone
+        # earns. So an `addressed` id needs no record and takes neither gate.
         #
         # Last of the publishers, so nothing old closes before the new review is on the
         # pull request.
@@ -2785,8 +2862,14 @@ jobs:
           # run. An older driver writes no `threads` key, and this step then closes
           # nothing -- which is what the workflow did before it could.
           CHECK: ${{ steps.drive.outputs.check_path }}
-          # What placement managed, and what it could not place. A superseded thread
-          # closes only when comments reached the code and none was left over.
+          # Which threads had their replacement reach the code, one id per line, and
+          # whether the driver published that linkage at all. Absent when placement did
+          # not run, and the fallback below refuses on its own terms there.
+          LINKAGE: ${{ steps.place.outputs.linkage_path }}
+          PLACED_LINKED: ${{ steps.place.outputs.superseded_linked }}
+          # What placement managed, and what it could not place. Read by the fallback
+          # gate alone: they are counts over the whole review and say nothing about
+          # which comment replaced which thread.
           PLACED_ON_LINE: ${{ steps.place.outputs.on_line }}
           PLACED_ON_FILE: ${{ steps.place.outputs.on_file }}
           PLACED_UNPLACED: ${{ steps.place.outputs.unplaced }}
@@ -2813,22 +2896,50 @@ jobs:
           done < <(jq -r '.threads.refused // [] | .[]' "$CHECK")
 
           wanted="$(jq -r '.threads.addressed // [] | .[]' "$CHECK")"
-          # Both halves are required. Counting only what landed lets one unrelated new
-          # finding on a line stand in for three superseded replacements that landed
-          # nowhere -- and those three threads would close with the findings that
-          # replaced them sitting in the summary instead of on the diff.
-          #
-          # The default in ${PLACED_UNPLACED:-1} is deliberate and is not a count. An
-          # absent output means placement did not report, which has to read as "something
-          # may be unplaced" rather than as zero: this gate decides whether a live
-          # finding comes off the pull request, so the unknown falls on the side that
-          # leaves the thread open.
-          placed=$(( ${PLACED_ON_LINE:-0} + ${PLACED_ON_FILE:-0} ))
           held="$(jq -r '.threads.superseded // [] | length' "$CHECK")"
-          if [ "$placed" -gt 0 ] && [ "${PLACED_UNPLACED:-1}" -eq 0 ]; then
-            wanted="$wanted"$'\n'"$(jq -r '.threads.superseded // [] | .[]' "$CHECK")"
-          elif [ "$held" -gt 0 ]; then
-            echo "$held superseded thread(s) stay open: $placed comment(s) reached the code and ${PLACED_UNPLACED:-an unreported number} could not be placed"
+
+          # The plan is the warrant and the record is which comment spent it, so a
+          # thread has to be in both. The plan alone would close one the record cannot
+          # account for; the record alone would close one the driver refused.
+          #
+          # An id nowhere in the record is a replacement that did not reach the code,
+          # whatever happened to the rest of the review. That is the whole of the gate:
+          # no count over the review enters it, because no count can say which comment
+          # replaced which thread.
+          if [ "${PLACED_LINKED:-}" = "true" ]; then
+            landed="${LINKAGE:-}"
+            [ -s "$landed" ] || landed=/dev/null
+            closing=0
+            while IFS= read -r id; do
+              [ -z "$id" ] && continue
+              if grep -qxF -- "$id" "$landed"; then
+                wanted="$wanted"$'\n'"$id"
+                closing=$((closing+1))
+                continue
+              fi
+              echo "review thread $id stays open: nothing replacing it reached the code"
+            done < <(jq -r '.threads.superseded // [] | .[]' "$CHECK")
+            if [ "$held" -gt 0 ]; then
+              echo "superseded: $closing of $held thread(s) had their own replacement reach the code"
+            fi
+          else
+            # The fallback, for a driver that publishes no linkage. Both halves are
+            # required. Counting only what landed lets one unrelated new finding on a
+            # line stand in for three superseded replacements that landed nowhere -- and
+            # those three threads would close with the findings that replaced them
+            # sitting in the summary instead of on the diff.
+            #
+            # The default in ${PLACED_UNPLACED:-1} is deliberate and is not a count. An
+            # absent output means placement did not report, which has to read as
+            # "something may be unplaced" rather than as zero: this gate decides whether
+            # a live finding comes off the pull request, so the unknown falls on the side
+            # that leaves the thread open.
+            placed=$(( ${PLACED_ON_LINE:-0} + ${PLACED_ON_FILE:-0} ))
+            if [ "$placed" -gt 0 ] && [ "${PLACED_UNPLACED:-1}" -eq 0 ]; then
+              wanted="$wanted"$'\n'"$(jq -r '.threads.superseded // [] | .[]' "$CHECK")"
+            elif [ "$held" -gt 0 ]; then
+              echo "$held superseded thread(s) stay open: $placed comment(s) reached the code and ${PLACED_UNPLACED:-an unreported number} could not be placed"
+            fi
           fi
           wanted="$(printf '%s\n' "$wanted" | sed '/^$/d' | sort -u)"
           if [ -z "$wanted" ]; then

@@ -1,0 +1,1 @@
+[{"file": "pkg/a.go", "line": 11, "side": "RIGHT", "severity": "blocker", "detail": "A's replacement.", "supersedes": ["PRRT_kwDOABCDEF4Ax1y2"]}, {"file": "pkg/a.go", "line": 12, "side": "RIGHT", "severity": "blocker", "detail": "B's replacement.", "supersedes": ["PRRT_kwDOABCDEF4Bz3w4"]}]

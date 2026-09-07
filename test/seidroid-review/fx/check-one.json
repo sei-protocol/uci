@@ -1,0 +1,11 @@
+{
+  "conclusion": "failure",
+  "title": "1 finding",
+  "summary": "One finding restates one open thread.",
+  "threads": {
+    "addressed": [],
+    "superseded": ["PRRT_kwDOABCDEF4Ax1y2"],
+    "refused": [],
+    "refused_total": 0
+  }
+}

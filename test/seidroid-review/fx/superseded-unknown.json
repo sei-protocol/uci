@@ -1,0 +1,1 @@
+[{"file": "pkg/huge.go", "line": 120, "side": "RIGHT", "severity": "blocker", "detail": "A's replacement, on a line the index cannot see.", "supersedes": ["PRRT_kwDOABCDEF4Ax1y2"]}]
