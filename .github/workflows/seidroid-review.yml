@@ -11,13 +11,17 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 # check runs.
 #
 # TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
-# wires that trigger and passes `mode: review`. A MANUAL one runs when a person
-# comments `@seidroid review`. Both spend model quota and hold a sandbox, so both are
-# gated -- see the guard below. Both paths refuse a fork-originated pull request. The
-# automatic path reviews a pull request once. It reviews a later push only where the
-# caller sets `re-review-on-push`, or where a block of its own stands. It also refuses
-# a draft and honours the skip-review label. The manual path additionally checks who
-# is asking.
+# wires that trigger and passes `mode: review`. A MANUAL one runs when a person writes
+# `@seidroid review` on the pull request: on the conversation, in a diff thread, or in
+# a review body. Both spend model quota and hold a sandbox, so both are gated -- see
+# the guard below. Both paths refuse a fork-originated pull request. The automatic path
+# reviews a pull request once. It reviews a later push only where the caller sets
+# `re-review-on-push`, or where a block of its own stands. It also refuses a draft and
+# honours the skip-review label. The manual path additionally checks who is asking.
+#
+# FOUR EVENTS reach this file, and the guard refuses any other by name: `pull_request`
+# for the automatic path, and `issue_comment`, `pull_request_review_comment` and
+# `pull_request_review` for the manual one. A caller wires the ones it wants.
 #
 # This file is the automation of record. It REPLACES `ai-review.yml` rather than
 # running beside it; a repository that wires the automatic path here should retire
@@ -107,6 +111,30 @@ on:
         required: false
         type: string
         default: 'v0.15.0'
+      trigger-phrase:
+        description: >-
+          The mention a person types to ask for a review. The command is that phrase
+          followed by `review`, alone on a line, optionally followed by `close`.
+
+          The `@` is optional. `@seidroid review` and `seidroid review` both ask for
+          the same thing, and a person who types the phrase without the mention still
+          means it. Two things make the wider form safe. The pattern is anchored to a
+          whole line, so a comment that discusses the command has other words on the
+          line and does not match. And ai-assistant.yml claims a body only when it
+          carries the `@` form, so the bare form reaches this workflow alone and no
+          second tool answers it.
+
+          It reaches a `grep -E` pattern, so its SHAPE is constrained rather than
+          escaped: a leading `@` and then letters, digits, `_` and `-` only. None of
+          those is an ERE metacharacter, so the pattern needs no escaping and a phrase
+          carrying `.` or `|` cannot widen the match. A phrase outside that shape is
+          refused with a warning and the default is used, which is what
+          guidelines-file below does with a name it cannot trust.
+
+          Matched case-sensitively. `@Seidroid review` starts no review.
+        required: false
+        type: string
+        default: '@seidroid'
       allowed-team:
         description: >-
           org/team-slug whose active members may ask for a review by comment. Empty
@@ -128,6 +156,32 @@ on:
         required: false
         type: string
         default: 'sei-protocol/sei-core'
+      allowed-bots:
+        description: >-
+          JSON array of exact bot logins that may ask for a review by comment. `[]`,
+          the default, denies every bot.
+
+          A login is the discriminating control here, and the actor's type is not: a
+          bot with write access to the calling repository carries MEMBER or
+          COLLABORATOR like anyone else, so refusing every bot is the only safe reading
+          of a type. This input names the ones a repository trusts. dependabot and
+          renovate are the cases it exists for.
+
+          Matched exactly and case-insensitively, twice: once in the guard's job
+          condition, so an unlisted bot starts no runner, and again in `Admit the
+          request`. A lookalike login does not pass either. ai-review.yml checks the
+          same input the same way.
+
+          A listed bot skips the allowed-team check, because a bot is not a team
+          member. It is held to every other rule: the fork check, the skip label and
+          the command grammar all apply.
+
+          Malformed JSON is a caller error: `fromJSON` refuses it rather than denying
+          quietly. `Admit the request` denies on it, so neither reading admits a bot
+          off a value nobody could parse.
+        required: false
+        type: string
+        default: '[]'
       approve-on-success:
         description: >-
           Approve the pull request when the review concludes clean. Off by
@@ -374,12 +428,12 @@ on:
           organisation.
 
           Fork code sits outside that acceptance, and the guard refuses it. An
-          explicit `@seidroid review` arrives as an issue_comment in the base
-          repository, which carries the secrets. That path reaches a fork's code
-          unless something stops it. The guard's fork check is what stops it, on
-          that path and on the automatic one. This shell therefore runs only over
-          code from inside the organisation. Weigh that before you widen or narrow
-          this list.
+          explicit `@seidroid review` arrives as a comment or review event in the
+          base repository, which carries the secrets. Those paths reach a fork's
+          code unless something stops them. The guard's fork check is what stops
+          it, on every one of them and on the automatic path. This shell therefore
+          runs only over code from inside the organisation. Weigh that before you
+          widen or narrow this list.
         required: false
         type: string
         default: 'Bash,Read'
@@ -502,12 +556,45 @@ jobs:
     permissions:
       pull-requests: read   # the pull request the fork and label checks read, and the gate's reviews
       issues: read          # the comments the gate reads to find a verdict
-    # Runs for an automatic pull_request review, and for any comment-triggered
-    # dispatch, review or close. For a comment it decides whether the commenter may
-    # command this workflow at all; for an automatic review it decides whether the
-    # pull request is in a state worth spending a sandbox on. Routing is the
-    # caller's: it reads the body and passes the mode. A close arriving as a
-    # pull_request event skips the guard, since GitHub's own event is the authority.
+    # Runs for an automatic pull_request review, for any comment-triggered dispatch,
+    # review or close, and for an event this workflow does not handle. For a comment
+    # it decides whether the requester may command this workflow at all; for an
+    # automatic review it decides whether the pull request is in a state worth
+    # spending a sandbox on. Routing is the caller's: it reads the body and passes the
+    # mode. A close arriving as a pull_request event skips the guard, since GitHub's
+    # own event is the authority.
+    #
+    # THREE COMMENT EVENTS carry the command. A comment on the conversation arrives as
+    # issue_comment, a comment in a diff thread as pull_request_review_comment, and a
+    # review body as pull_request_review. Each names the requester under a different
+    # payload key, so every read below takes the comment key or the review key,
+    # whichever the event populated. On pull_request both are empty and this branch
+    # does not apply.
+    #
+    # The two diff-side events are held to their creating action. A review may also
+    # arrive `edited` or `dismissed`, and a dismissal replays the body of the review it
+    # dismisses -- so a caller that wires those types would spend a sandbox re-running
+    # a review every time somebody dismissed one. issue_comment is left as it stands.
+    #
+    # A REQUESTER passes on one of two grounds. A person passes on
+    # author_association, which admits a collaborator on the repository the request
+    # was made in and no untrusted pull request author. A bot passes only by exact
+    # login in allowed-bots, because association does not discriminate a bot: one with
+    # write access to the calling repository carries MEMBER or COLLABORATOR like
+    # anyone else. `Admit the request` reads both grounds again.
+    #
+    # `allowed-bots || '[]'` because a workflow_call default applies only to an input
+    # the caller OMITS. A caller passing `allowed-bots: ${{ vars.SOMETHING }}` with
+    # that variable unset passes the empty string, and fromJSON('') is not `[]` -- it
+    # fails the expression and takes the run with it. Empty therefore reads as the
+    # documented default here, which denies every bot. A non-empty value that is not
+    # JSON still fails, and loudly: that is a caller wiring error, not an omission.
+    #
+    # The last clause admits an event this workflow does not handle, so the refusal
+    # step below can name it. Without it the job is skipped, every job after it is
+    # skipped, and the run reports success having done nothing. pull_request is
+    # excluded from that clause: a pull_request close skips this guard deliberately,
+    # and the review job reads that skip as its own trigger.
     #
     # The pull_request branch carries no author-association check, matching the path
     # this file replaces: the event is the push itself rather than a person's
@@ -515,27 +602,91 @@ jobs:
     # organisation, on this path as well as the comment path.
     if: >-
       ${{ (github.event_name == 'pull_request' && inputs.mode == 'review') ||
-      (github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request != null &&
-      github.event.comment.user.type != 'Bot' &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) }}
+      (((github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.action == 'created') ||
+      (github.event_name == 'pull_request_review' && github.event.action == 'submitted')) &&
+      (((github.event.comment.user.type || github.event.review.user.type) != 'Bot' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+      github.event.comment.author_association || github.event.review.author_association)) ||
+      ((github.event.comment.user.type || github.event.review.user.type) == 'Bot' &&
+      contains(fromJSON(inputs.allowed-bots || '[]'),
+      github.event.comment.user.login || github.event.review.user.login)))) ||
+      (github.event_name != 'pull_request' &&
+      !contains(fromJSON('["issue_comment","pull_request_review_comment","pull_request_review"]'),
+      github.event_name)) }}
     outputs:
       should_run: ${{ steps.parse.outputs.should_run == 'true' && steps.admit.outputs.admit == 'true' }}
       pr_number: ${{ steps.parse.outputs.pr_number }}
       comment_id: ${{ steps.parse.outputs.comment_id }}
+      # Which REST collection carries the reactions on the object that asked. The
+      # acknowledgement and the verdict reaction both take this path, and it differs
+      # per event: an issue comment lives under issues/comments, a diff-thread comment
+      # under pulls/comments. Empty where the request is not a reactable object, which
+      # is also when comment_id is empty, so a step gated on either skips.
+      #
+      # The two collections take different token scopes. GitHub grants
+      # issues/comments/{id}/reactions to Issues alone and pulls/comments/{id}/reactions
+      # to Pull requests; the review job holds both.
+      comment_api: ${{ steps.parse.outputs.comment_api }}
+      # The id of the object that asked, for the log. Populated on every comment
+      # event, including the one that carries no reactions endpoint, because this
+      # answers "which request started this run" rather than "what may this run react
+      # on". comment_id above answers the second and is held back where nothing can
+      # reach it; the driver's --trigger-id takes this one.
+      trigger_id: ${{ steps.parse.outputs.trigger_id }}
     steps:
+      # First, and before the identity mint below, so a caller that mis-wired its
+      # triggers learns the reason without spending a credential. A refusal here fails
+      # the job, and a failed step skips every step after it.
+      #
+      # The job condition above admits an unsupported event for exactly this step.
+      # Without the refusal the condition simply would not match, the guard and the
+      # review job would both be skipped, and the run would report success having
+      # reviewed nothing -- which reads as "the workflow ran" to anyone looking at the
+      # checks list.
+      #
+      # pull_request_target is named apart because it is the one a caller reaches for
+      # to make a fork review work. It runs against the BASE repository's secrets with
+      # a writable token while the pull request's head is what a reviewer wants to
+      # read. This workflow checks nothing out, so no step here would run fork code
+      # today; the refusal is the control that does not depend on that staying true.
+      # ai-review.yml refuses the same event for the same reason.
+      - name: Refuse an event this workflow does not handle
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+          case "$EVENT_NAME" in
+            pull_request|issue_comment|pull_request_review_comment|pull_request_review) ;;
+            pull_request_target)
+              echo "::error::seidroid review refuses pull_request_target: it runs with the base repository's secrets and a writable token over a head this workflow did not check out. Call it from pull_request, issue_comment, pull_request_review_comment or pull_request_review instead. A fork pull request is refused on every one of those, by design" >&2
+              exit 1
+              ;;
+            *)
+              echo "::error::seidroid review cannot be called from '$EVENT_NAME'; it handles pull_request, issue_comment, pull_request_review_comment and pull_request_review" >&2
+              exit 1
+              ;;
+          esac
       - id: parse
-        # Every GitHub-supplied value (the comment body, the PR number, the
+        # Every GitHub-supplied value (the request body, the PR number, the
         # comment id) comes in through env and is read back as "$VAR" below --
         # never interpolated as ${{ }} directly into the shell script, even for
         # the two fields (issue number, comment id) that GitHub happens to
         # always populate with integers. Routing all three the same way means
         # there is one pattern to audit, not one safe-looking exception.
+        #
+        # Each read takes the comment key or the review key, whichever the arriving
+        # event populated. issue_comment and pull_request_review_comment both carry
+        # `comment`; pull_request_review carries `review`, and its own id under
+        # `review.id`. A read that took only one key would leave the body empty on the
+        # other events, and an empty body parses as no command -- a request that
+        # vanishes with no reaction and no run to point at.
         env:
-          BODY: ${{ github.event.comment.body }}
+          BODY: ${{ github.event.comment.body || github.event.review.body }}
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
-          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_ID: ${{ github.event.comment.id || github.event.review.id }}
           EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
         run: |
           set -euo pipefail
           # An automatic review has no comment to parse: the event IS the request, and
@@ -547,20 +698,60 @@ jobs:
               echo "should_run=true"
               echo "pr_number=$PR_NUMBER"
               echo "comment_id="
+              echo "comment_api="
+              echo "trigger_id="
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Which REST collection carries the reactions on the object that asked, and
+          # so whether an acknowledgement can land on it at all. GitHub publishes a
+          # reactions endpoint for an issue comment and for a pull request review
+          # comment, and none for a pull request REVIEW -- only the GraphQL schema
+          # makes a review reactable. So a command in a review body starts a review and
+          # earns no reaction, and the notice below is the signal that it started.
+          #
+          # The id goes out empty with it. `Acknowledge the trigger` and `Answer the
+          # request` both gate on comment_id, and the eyes one posts are the eyes the
+          # other withdraws: an id with no endpoint to reach would leave a request
+          # wearing eyes nothing clears.
+          comment_api=""
+          case "$EVENT_NAME" in
+            issue_comment)               comment_api=issues/comments ;;
+            pull_request_review_comment) comment_api=pulls/comments ;;
+          esac
+
+          # The phrase is caller-settable and reaches the grep pattern below, so its
+          # SHAPE is constrained here rather than escaped: an optional leading @, then
+          # letters, digits, `_` and `-`. None of those is an ERE metacharacter, so the
+          # pattern carries the phrase verbatim and a phrase holding `.` or `|` cannot
+          # widen the match. Escaping instead would have to cover every ERE
+          # metacharacter correctly forever; a character class is one thing to read.
+          #
+          # A phrase outside that shape falls back to the default with a warning,
+          # which is what guidelines-file does with a name it cannot trust. The
+          # alternative is failing the job on every comment the repository receives,
+          # for a caller mistake that leaves the documented phrase working.
+          phrase="${TRIGGER_PHRASE#@}"
+          case "$phrase" in
+            ""|*[!A-Za-z0-9_-]*)
+              echo "::warning::trigger-phrase '$TRIGGER_PHRASE' is not an optional @ followed by letters, digits, _ or -; using @seidroid instead"
+              phrase=seidroid
+              ;;
+          esac
+
           cmd="$(printf '%s' "$BODY" | tr -d '\r')"
           # Require a LINE reading `@seidroid review`, optionally `close`, and nothing
           # else on it. Anchoring to a whole line is what keeps a comment that merely
           # quotes or discusses the command from triggering a review.
           #
-          # The @ is optional so `@seidroid review` -- the documented form, and what
-          # the mention actually notifies -- and a bare `seidroid review` both work.
-          # Whole-line anchoring is what keeps that safe: a comment discussing the
-          # command has other words on the line and does not match.
+          # The @ is optional, and that is a widening this workflow keeps. A person who
+          # types the phrase without the mention still means it. Whole-line anchoring
+          # is what makes it safe: a comment discussing the command has other words on
+          # the line and does not match. And ai-assistant.yml reserves a body only when
+          # it carries the @ form, so the bare form reaches this workflow alone.
           cmdline="$(printf '%s\n' "$cmd" \
-            | grep -m1 -E '^[[:space:]]*@?seidroid[[:space:]]+review([[:space:]]+close)?[[:space:]]*$' || true)"
+            | grep -m1 -E "^[[:space:]]*@?${phrase}[[:space:]]+review([[:space:]]+close)?[[:space:]]*$" || true)"
           if [ -z "$cmdline" ]; then
             # A review runs only on the repository the pull request is on, so a
             # request that names a repository is named in this run's log. That is all
@@ -587,12 +778,15 @@ jobs:
             # reads the SIGPIPE as a failed pipeline and the refusal is not written.
             # Measured: at 232 kB the -q form reports status 141 and stays silent.
             named_repo="$(printf '%s\n' "$cmd" \
-              | grep -m1 -E '^[[:space:]]*@?seidroid[[:space:]]+review([[:space:]]+close)?[[:space:]]+[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*#[0-9]+[[:space:]]*$' || true)"
+              | grep -m1 -E "^[[:space:]]*@?${phrase}[[:space:]]+review([[:space:]]+close)?[[:space:]]+[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*#[0-9]+[[:space:]]*$" || true)"
             if [ -n "$named_repo" ]; then
               echo "::notice::seidroid review takes no repository target; a review runs only on the repository the pull request is on"
             fi
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ -z "$comment_api" ]; then
+            echo "::notice::$EVENT_NAME carries no reactions endpoint, so this request earns no acknowledgement on the object it was written on; the review runs and posts its verdict as a comment"
           fi
           {
             echo "should_run=true"
@@ -601,7 +795,18 @@ jobs:
             # dispatch in the logs. The pull request, not the comment, is the
             # session key — so any dispatch adopts that PR's session and drives a
             # fresh review turn on the current tree.
-            echo "comment_id=$COMMENT_ID"
+            #
+            # Emitted with the endpoint that reaches it, and held back when there is
+            # none: the two are read together by every step that reacts. trigger_id
+            # beside it carries the id whatever the event, so the driver still labels
+            # a dispatch that can be reacted on nowhere.
+            if [ -n "$comment_api" ]; then
+              echo "comment_id=$COMMENT_ID"
+            else
+              echo "comment_id="
+            fi
+            echo "comment_api=$comment_api"
+            echo "trigger_id=$COMMENT_ID"
           } >> "$GITHUB_OUTPUT"
 
       # Only reached once the command itself parsed, so a comment that says
@@ -623,8 +828,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token }}
           ALLOWED_TEAM: ${{ inputs.allowed-team }}
+          ALLOWED_BOTS: ${{ inputs.allowed-bots }}
           SKIP_LABEL: ${{ inputs.skip-review-label }}
-          ACTOR: ${{ github.event.comment.user.login }}
+          # Who asked, under whichever key the arriving event populated. A review body
+          # names its author under `review.user`; the two comment events name theirs
+          # under `comment.user`.
+          ACTOR: ${{ github.event.comment.user.login || github.event.review.user.login }}
+          ACTOR_TYPE: ${{ github.event.comment.user.type || github.event.review.user.type }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.parse.outputs.pr_number }}
           PARSED: ${{ steps.parse.outputs.should_run }}
@@ -664,32 +874,61 @@ jobs:
             deny "$REPO#$PR is a draft; not reviewing"
           fi
 
-          # Membership is a security control, so it fails closed: empty, malformed
-          # and unanswerable all deny. The job condition has already required an
-          # OWNER/MEMBER/COLLABORATOR association, which admits any collaborator on
-          # the repository the request was made in; a team narrows that.
+          # WHO may command a review, checked again here. The job condition has
+          # already applied the same two grounds, and this is the second reading of
+          # them: a condition is one expression on one line, and a control worth having
+          # is worth stating where a person debugging a refusal can read the reason.
           #
-          # It gates who may COMMAND a review, so it applies to the comment path only.
-          # An automatic run has no commander: applying the team check there would
-          # silently stop reviewing every pull request opened by anyone outside the
-          # team, which is the opposite of what a caller sets this input for.
+          # A bot is held to allowed-bots and a person to allowed-team, because neither
+          # test answers for the other. A bot is not a team member, so the membership
+          # read would refuse every bot however trusted. And a bot's author_association
+          # says nothing: one with write access to the calling repository carries MEMBER
+          # or COLLABORATOR like anyone else.
           #
-          # It stops a REVIEW, not a teardown, for the reason the label check below
-          # states. Any collaborator the job condition admits may reclaim a sandbox,
-          # whether or not they are on the team, because the alternative is a sandbox
-          # nothing reclaims.
+          # Both fail closed: empty, malformed and unanswerable all deny. This step
+          # runs without -e, so a read that fails leaves the variable empty, and an
+          # empty value matches neither "true" nor "active".
           #
-          # Reading an organisation's teams needs the App identity, so a caller that
-          # configures no App is refused here. The notice says so, and names the one
-          # thing that fixes it.
+          # Both gate the comment path only. An automatic run has no commander:
+          # applying either check there would silently stop reviewing every pull
+          # request opened by anyone outside the team, which is the opposite of what a
+          # caller sets these inputs for.
+          #
+          # Both stop a REVIEW, not a teardown, for the reason the label check below
+          # states. Any requester the job condition admits may reclaim a sandbox,
+          # because the alternative is a sandbox nothing reclaims.
           if [ "$EVENT_NAME" != "pull_request" ] && [ "$MODE" != "close" ]; then
-            case "$ALLOWED_TEAM" in
-              */*) ;;
-              *) deny "allowed-team is empty or is not org/team-slug; denying" ;;
-            esac
-            [ -n "${GH_TOKEN:-}" ] || deny "this run holds no App identity, so it cannot read membership of $ALLOWED_TEAM; denying. Pass SEIDROID_APP_ID and SEIDROID_APP_PRIVATE_KEY to this workflow. An automatic pull_request review and @seidroid review close do not reach this check"
-            state="$(gh api "orgs/${ALLOWED_TEAM%%/*}/teams/${ALLOWED_TEAM##*/}/memberships/${ACTOR}"               --jq .state 2>/dev/null || true)"
-            [ "$state" = "active" ] || deny "$ACTOR is not an active member of $ALLOWED_TEAM; denying"
+            # Lowercased before the comparison, so this reader and the job condition
+            # read one type the same way: GitHub's expression `==` ignores case and
+            # the shell's does not.
+            actor_type="$(printf '%s' "$ACTOR_TYPE" | tr '[:upper:]' '[:lower:]')"
+            if [ "$actor_type" = "bot" ]; then
+              # An exact, case-insensitive login match against a JSON array, which is
+              # how ai-review.yml reads the same input. Exact, because a substring test
+              # admits a lookalike in either direction: `bot` passes against a listed
+              # `dependabot[bot]`, and so does `dependabot[bot]x`. Case-insensitive,
+              # because GitHub treats one login as one account whatever case it is
+              # written in, and the job condition above compares it that way too.
+              #
+              # A value that is not a JSON array of strings yields no match and denies.
+              listed="$(printf '%s' "$ALLOWED_BOTS" \
+                | jq -r --arg actor "$ACTOR" \
+                    'if type == "array"
+                     then any(.[]; type == "string" and ascii_downcase == ($actor | ascii_downcase))
+                     else false end' 2>/dev/null || true)"
+              [ "$listed" = "true" ] || deny "$ACTOR is not in allowed-bots; denying"
+            else
+              # Reading an organisation's teams needs the App identity, so a caller
+              # that configures no App is refused here. The notice says so, and names
+              # the one thing that fixes it.
+              case "$ALLOWED_TEAM" in
+                */*) ;;
+                *) deny "allowed-team is empty or is not org/team-slug; denying" ;;
+              esac
+              [ -n "${GH_TOKEN:-}" ] || deny "this run holds no App identity, so it cannot read membership of $ALLOWED_TEAM; denying. Pass SEIDROID_APP_ID and SEIDROID_APP_PRIVATE_KEY to this workflow. An automatic pull_request review and @seidroid review close do not reach this check"
+              state="$(gh api "orgs/${ALLOWED_TEAM%%/*}/teams/${ALLOWED_TEAM##*/}/memberships/${ACTOR}" --jq .state 2>/dev/null || true)"
+              [ "$state" = "active" ] || deny "$ACTOR is not an active member of $ALLOWED_TEAM; denying"
+            fi
           fi
 
           # A fork pull request carries code from outside the organisation. A review
@@ -703,9 +942,17 @@ jobs:
           # repository can turn that withholding off, per repository or by organisation
           # policy. This check does not rest on a setting nobody here controls.
           #
-          # A pull_request payload carries both repository ids, so that path spends no
-          # API call. An issue_comment payload carries no head repository, so the API
-          # answers there. Repository ids, not names, so a rename does not read as a
+          # Keyed on the EVENT, not on whether the payload carried the ids. A
+          # pull_request payload carries both, so that path spends no API call.
+          # issue_comment carries no pull request object at all, so the API answers
+          # there. pull_request_review_comment and pull_request_review DO carry
+          # `pull_request.head.repo.id` and `.base.repo.id`, and this branch ignores
+          # them: the label check below reads the same endpoint unconditionally on
+          # every one of these paths, so reading the payload here would remove one of
+          # two identical round trips and neither the failure mode nor the dependency.
+          # A branch keyed on payload shape rather than on event would also have to
+          # keep this check's fail-closed rule, and that rule is the highest-consequence
+          # one in the guard. Repository ids, not names, so a rename does not read as a
           # fork. A null head repository reads as a fork, which is the safe reading.
           #
           # This check fails closed, unlike the label check below. Only a definite "same"
@@ -934,9 +1181,15 @@ jobs:
     # result it expects, so neither admits the other's: a pull_request REVIEW is
     # guarded, because that is where draft and skip-label are decided, while a
     # pull_request CLOSE is not guarded at all.
+    #
+    # The command arrives on three comment events, and all three name the guard's
+    # success. An event this workflow does not handle fails the guard rather than
+    # skipping it, so no clause here admits one.
     if: >-
       ${{ !cancelled() && (
       ((github.event_name == 'issue_comment' ||
+        github.event_name == 'pull_request_review_comment' ||
+        github.event_name == 'pull_request_review' ||
         (github.event_name == 'pull_request' && inputs.mode == 'review')) &&
         needs.guard.result == 'success' &&
         needs.guard.outputs.should_run == 'true') ||
@@ -976,11 +1229,17 @@ jobs:
       pull-requests: write   # post the verdict comment and the review position
       contents: read         # read PR metadata
       checks: write          # publish the review's check runs
-      # React to the triggering comment. A reaction on a PR comment goes to the
-      # ISSUE comments endpoint, which pull-requests: write does not cover. GitHub's
-      # permission table grants that endpoint's POST and DELETE to Issues alone, and
-      # grants the comment itself to either scope, so the alias stops at the reaction.
-      # GraphQL addReaction is the other route to it, and GitHub documents no
+      # React to the triggering comment. BOTH scopes are load-bearing, one per
+      # collection: a conversation comment's reactions live under issues/comments,
+      # whose POST and DELETE GitHub's permission table grants to Issues alone, and a
+      # diff-thread comment's under pulls/comments, granted to Pull requests. The
+      # guard picks the collection per event, so a review that reacts on a diff thread
+      # needs pull-requests: write and one on the conversation needs issues: write.
+      # Prune either and the reaction fails on the path it serves, silently: all three
+      # reacting steps treat a lost reaction as a courtesy and warn.
+      #
+      # The comment itself is grantable by either scope, so the alias stops at the
+      # reaction. GraphQL addReaction is the other route, and GitHub documents no
       # permission for any mutation, so only a live call settles what that route needs.
       issues: write          # acknowledge the trigger with a reaction
     # The credential lives ONLY here, at job level. It must never be re-declared
@@ -1024,6 +1283,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          # The collection the request's own reactions live under, from the guard. A
+          # conversation comment and a diff-thread comment take different endpoints,
+          # and the guard emits an id only where one of them reaches it.
+          COMMENT_API: ${{ needs.guard.outputs.comment_api }}
         run: |
           set -euo pipefail
           # Reactions are idempotent per (user, content): re-running a review on
@@ -1032,8 +1295,9 @@ jobs:
           #
           # `Answer the request` withdraws this reaction on every path it takes, and the
           # last step of the job withdraws it on the one path that step skips. A review
-          # that keeps it reads as a review that is still running.
-          if gh api -X POST "repos/$REPO/issues/comments/$TRIGGER_ID/reactions" \
+          # that keeps it reads as a review that is still running. All three read
+          # COMMENT_API, so all three reach the collection this one posted to.
+          if gh api -X POST "repos/$REPO/$COMMENT_API/$TRIGGER_ID/reactions" \
               -f content=eyes >/dev/null 2>&1; then
             echo "acknowledged comment $TRIGGER_ID"
           else
@@ -1498,7 +1762,11 @@ jobs:
           # The guard supplies this for a review; a close event carries its own
           # number and skips the guard entirely.
           PR: ${{ needs.guard.outputs.pr_number || github.event.pull_request.number }}
-          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          # trigger_id, not comment_id: this labels the dispatch in the driver's log
+          # and nothing else, so it wants the id whatever the event. comment_id is the
+          # reactable-object id and goes out empty where nothing can react on it,
+          # which would leave a review-body dispatch with no label at all.
+          TRIGGER_ID: ${{ needs.guard.outputs.trigger_id }}
           # The findings this reviewer left before, so it drops what the author has
           # addressed and keeps what the diff still shows. No token rides with it:
           # this step reaches GitHub through nothing, which is the boundary that
@@ -2431,6 +2699,9 @@ jobs:
           # ran on.
           TRIGGER_REPO: ${{ github.repository }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          # The same collection `Acknowledge the trigger` posted the eyes to. Reading
+          # a different one leaves them standing.
+          COMMENT_API: ${{ needs.guard.outputs.comment_api }}
           CHECK: ${{ steps.drive.outputs.check_path }}
           # Whether there is a verdict to react to. See the conclusion below.
           VERDICT_PRODUCED: ${{ steps.drive.outputs.verdict_produced }}
@@ -2491,7 +2762,7 @@ jobs:
           # nothing this block reports can be read back as a reaction id. Paginated,
           # because a busy comment carries more reactions than one page holds and a
           # miss leaves the request wearing the eyes, or a thumb this run replaces.
-          if ! mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+          if ! mine="$(gh api "repos/$TRIGGER_REPO/$COMMENT_API/$TRIGGER_ID/reactions" \
                          --paginate \
                          --jq ".[] | select(.user.login == \"$me\") | \"\\(.content) \\(.id)\"")"; then
             echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; the eyes or a stale thumb from this bot may stay on it"
@@ -2501,7 +2772,7 @@ jobs:
             [ -n "$rid" ] || continue
             case " $stale " in *" $content "*) ;; *) continue ;; esac
             if gh api -X DELETE \
-                 "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
+                 "repos/$TRIGGER_REPO/$COMMENT_API/$TRIGGER_ID/reactions/$rid" \
                  >/dev/null; then
               echo "withdrew this bot's $content from comment $TRIGGER_ID"
             else
@@ -2516,7 +2787,7 @@ jobs:
           # Never fatal: a reaction is a courtesy, and losing one must not fail a review
           # that ran and published. Idempotent per identity and content, so a re-run on
           # the same comment returns the reaction already there rather than a second one.
-          if gh api -X POST "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+          if gh api -X POST "repos/$TRIGGER_REPO/$COMMENT_API/$TRIGGER_ID/reactions" \
                -f content="$reaction" >/dev/null; then
             echo "reacted $reaction on comment $TRIGGER_ID in $TRIGGER_REPO"
           else
@@ -3254,6 +3525,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TRIGGER_REPO: ${{ github.repository }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          # The collection the two steps above reacted on. It differs per event, so
+          # reading a fixed one would leave a diff-thread request wearing the eyes
+          # nothing here could reach.
+          COMMENT_API: ${{ needs.guard.outputs.comment_api }}
           # Whether this run ever reached the step that answers. See the withdrawal set
           # below. Four words about another step; none of them a conclusion.
           ANSWERED: ${{ steps.answer.outcome }}
@@ -3289,7 +3564,7 @@ jobs:
           # Listed into a variable and read from it rather than through a pipe, so
           # nothing this block reports can be read back as a reaction id. Paginated,
           # because a busy comment carries more reactions than one page holds.
-          if ! mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+          if ! mine="$(gh api "repos/$TRIGGER_REPO/$COMMENT_API/$TRIGGER_ID/reactions" \
                          --paginate \
                          --jq ".[] | select(.user.login == \"$me\") | \"\\(.content) \\(.id)\"")"; then
             echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; the eyes from this cancelled run may stay on it"
@@ -3301,7 +3576,7 @@ jobs:
             [ -n "$rid" ] || continue
             case "$takeable" in *" $content "*) ;; *) continue ;; esac
             if gh api -X DELETE \
-                 "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
+                 "repos/$TRIGGER_REPO/$COMMENT_API/$TRIGGER_ID/reactions/$rid" \
                  >/dev/null; then
               echo "withdrew this bot's $content from comment $TRIGGER_ID"
             else

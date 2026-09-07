@@ -27,7 +27,7 @@ done
 
 case "$verb:$path" in
   GET:*/reactions)
-    log "CALL list"
+    log "CALL list $path"
     [ "${STUB_LIST:-ok}" = FAIL ] && exit 1
     # Through the step's own filter, so the filter is under test and not the harness's
     # idea of it.
@@ -35,7 +35,7 @@ case "$verb:$path" in
     ;;
   DELETE:*/reactions/*)
     rid="${path##*/}"
-    log "CALL delete $rid"
+    log "CALL delete $rid $path"
     [ "${STUB_DELETE:-ok}" = FAIL ] && exit 1
     jq -e --argjson rid "$rid" 'any(.[]; .id == $rid)' < "$STUB_STATE" > /dev/null || {
       log "  no such reaction $rid"; exit 1; }
@@ -45,7 +45,7 @@ case "$verb:$path" in
   POST:*/reactions)
     content=""
     for f in "${fields[@]:-}"; do case "$f" in content=*) content="${f#content=}" ;; esac; done
-    log "CALL post $content"
+    log "CALL post $content $path"
     [ "${STUB_POST:-ok}" = FAIL ] && exit 1
     # Idempotent per (user, content): the API returns the reaction already there
     # rather than adding a second one.

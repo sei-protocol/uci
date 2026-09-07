@@ -1,20 +1,38 @@
 name: Workflow tests
-# The shell and jq inside seidroid-review.yml, run against a gh stub. Nothing here
-# reaches the GitHub API, so this needs no token and no permissions.
+# The shell and jq inside seidroid-review.yml, run against a gh stub, and its job
+# conditions evaluated against synthetic payloads. Nothing here reaches the GitHub
+# API, so this needs no token and no permissions.
 #
-# Two steps, one harness. Placement records which thread each posted comment
-# replaced and the resolve step closes on that record, so the pair is the behaviour
-# worth testing rather than either half.
+# Three jobs, so each check in the list names the step it covers. A job that ran two
+# harnesses would report one name for two things, and one check would go red for the
+# other's failure.
+#
+# `Place findings and resolve threads` covers a pair of steps rather than either half:
+# placement records which thread each posted comment replaced, and the resolve step
+# closes on that record. `The reaction steps` covers which of the three runs in which
+# job state, and what each leaves on the trigger comment. `Guard the request` covers
+# the admission path, from the event the workflow accepts to the collection the
+# acknowledgement reaches.
 on:
   pull_request:
     paths:
       - '.github/workflows/seidroid-review.yml'
+      # run-guard.sh asserts what ai-assistant.yml claims of the same comment, so an
+      # edit there can break an invariant stated here. Without this the break lands
+      # on the next unrelated pull request that touches the file above, pointing at
+      # the wrong change.
+      - '.github/workflows/ai-assistant.yml'
       - '.github/workflows/workflow-test-self.yml'
       - 'test/seidroid-review/**'
   push:
     branches: [ main ]
     paths:
       - '.github/workflows/seidroid-review.yml'
+      # run-guard.sh asserts what ai-assistant.yml claims of the same comment, so an
+      # edit there can break an invariant stated here. Without this the break lands
+      # on the next unrelated pull request that touches the file above, pointing at
+      # the wrong change.
+      - '.github/workflows/ai-assistant.yml'
       - '.github/workflows/workflow-test-self.yml'
       - 'test/seidroid-review/**'
 permissions:
@@ -35,9 +53,6 @@ jobs:
       - name: Run the placement and resolve harness
         run: test/seidroid-review/run.sh
 
-  # Its own job, so each check in the list names the step it covers. A job that runs
-  # both harnesses would report one name for two things, and the placement check would
-  # go red for a reaction.
   reactions:
     name: The reaction steps
     runs-on: ubuntu-latest
@@ -56,3 +71,18 @@ jobs:
       # lives and which the shell harness above cannot see.
       - name: Check the step conditions
         run: python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
+
+  guard-admission:
+    name: Guard the request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install the YAML reader
+        run: python3 -m pip install --quiet pyyaml
+      - name: Run the guard harness
+        run: test/seidroid-review/run-guard.sh

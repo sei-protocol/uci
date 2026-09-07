@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# gh stub for the guard steps: logs every call, serves the answer the case chose,
+# and runs the step's own --jq filter over it.
+#
+# A failed read prints nothing and exits non-zero, which is the shape `Admit the
+# request` is written against: it captures stdout, so an empty capture is what
+# tells the fork check and the once-per-PR gate that nobody answered. The
+# placement stub beside this one files an error body instead, because that step
+# reads one.
+#
+# Five reads reach here. The team membership read and the once-per-PR reads are
+# told apart by their path; the fork check and the label check share a path and
+# are told apart by the filter each sends.
+log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
+
+argv=("$@")
+joined="$*"
+
+filter=""
+n=${#argv[@]}
+for ((i = 0; i < n; i++)); do
+  [ "${argv[i]}" = "--jq" ] && filter="${argv[i + 1]}"
+done
+
+serve() { # fixture-json
+  printf '%s' "$1" | jq -r "$filter"
+  exit 0
+}
+
+refuse() { # what-failed
+  log "CALL $1 FAILED"
+  echo "gh: the stub was told this read fails" >&2
+  exit 1
+}
+
+# Ahead of the comment reads below: an issue comment's reactions path carries
+# /issues/ and comments too, and the first matching case wins.
+case "$joined" in
+  *"/reactions"*)
+    method=GET
+    for ((i = 0; i < n; i++)); do
+      [ "${argv[i]}" = "-X" ] && method="${argv[i + 1]}"
+    done
+    for a in "${argv[@]}"; do case "$a" in repos/*/reactions*) url="$a" ;; esac; done
+    log "CALL reaction $method ${url:-none}"
+    [ "${STUB_REACTIONS:-none}" = "FAIL" ] && refuse reaction
+    case "$method" in
+      GET)
+        case "${STUB_REACTIONS:-none}" in
+          eyes) serve '[{"id":1,"content":"eyes","user":{"login":"github-actions[bot]"}}]' ;;
+          *)    serve '[]' ;;
+        esac
+        ;;
+      *) exit 0 ;;
+    esac
+    ;;
+esac
+
+case "$joined" in
+  *"/teams/"*"/memberships/"*)
+    for a in "${argv[@]}"; do case "$a" in */memberships/*) who="${a##*/}" ;; esac; done
+    log "CALL membership $who"
+    [ "${STUB_TEAM:-active}" = "FAIL" ] && refuse membership
+    serve "{\"state\":\"${STUB_TEAM:-active}\"}"
+    ;;
+esac
+
+case "$joined" in
+  *"/pulls/"*"/reviews"*)
+    log "CALL reviews"
+    [ "${STUB_REVIEWS:-none}" = "FAIL" ] && refuse reviews
+    case "${STUB_REVIEWS:-none}" in
+      blocked) serve "[{\"id\":11,\"state\":\"CHANGES_REQUESTED\",\"body\":\"${VERDICT_MARKER}a block\"}]" ;;
+      *)       serve '[]' ;;
+    esac
+    ;;
+esac
+
+case "$joined" in
+  *"/issues/"*"/comments"*)
+    log "CALL comments"
+    [ "${STUB_COMMENTS:-none}" = "FAIL" ] && refuse comments
+    case "${STUB_COMMENTS:-none}" in
+      verdict) serve "[{\"id\":22,\"user\":{\"type\":\"Bot\"},\"body\":\"${VERDICT_MARKER}a verdict\"}]" ;;
+      *)       serve '[]' ;;
+    esac
+    ;;
+esac
+
+case "$joined" in
+  *"/pulls/"*)
+    # The fork check names head.repo.id in its filter; the label check names labels.
+    case "$filter" in
+      *head.repo.id*)
+        log "CALL origin"
+        [ "${STUB_ORIGIN:-same}" = "FAIL" ] && refuse origin
+        case "${STUB_ORIGIN:-same}" in
+          same) serve '{"head":{"repo":{"id":1}},"base":{"repo":{"id":1}}}' ;;
+          fork) serve '{"head":{"repo":{"id":2}},"base":{"repo":{"id":1}}}' ;;
+          null) serve '{"head":{"repo":null},"base":{"repo":{"id":1}}}' ;;
+        esac
+        ;;
+      *labels*)
+        log "CALL labels"
+        [ "${STUB_LABELS:-}" = "FAIL" ] && refuse labels
+        names="$(jq -nc --arg list "${STUB_LABELS:-}" \
+          'if $list == "" then [] else ($list | split(",") | map({name: .})) end')"
+        serve "{\"labels\":$names}"
+        ;;
+    esac
+    ;;
+esac
+
+log "CALL unhandled $joined"
+exit 1

@@ -1,40 +1,48 @@
 # Workflow tests
 
-Two harnesses over `.github/workflows/seidroid-review.yml`. Both read the steps out
-of the YAML on every run, so neither can pass against a stale copy.
+Three harnesses over `.github/workflows/seidroid-review.yml`. All three read the
+steps out of the YAML on every run, so none can pass against a stale copy.
 
 ```sh
 test/seidroid-review/run.sh        # placement and thread resolution
 test/seidroid-review/reactions.sh  # the three reaction steps
+test/seidroid-review/run-guard.sh  # the guard, and the reaction collection
 python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
 ```
 
-# `Place findings on the code` and `Resolve the threads this review closed`
+Each needs `bash`, `jq`, and `python3` with PyYAML, and exits non-zero on the
+first failed assertion count.
+
+`extract.py` is shared. It reads a step's `run:` block and a workflow-level env
+key out of the YAML, by step name or step id.
+
+`reactions.sh` and `run-guard.sh` both extract `Acknowledge the trigger` and
+`Answer the request`, and they ask different things of them: `reactions.sh` asks
+which step runs in which job state and what it leaves on the comment,
+`run-guard.sh` asks which REST collection the URL reaches. Each writes its own
+extraction — `ack.sh` and `answer.sh` against `guard-ack.sh` and
+`guard-answer.sh` — so running both cannot have one overwrite the other.
+
+## `Place findings on the code` and `Resolve the threads this review closed`
 
 Runs both steps under `bash`, against a `gh` stub, and checks what they posted,
-counted and closed.
-
-The run needs `bash`, `jq`, and `python3` with PyYAML. It exits non-zero on the
-first failed assertion count and prints a table of one row per case.
+counted and closed. It prints a table of one row per case.
 
 Both steps are in one harness because they are one behaviour. Placement records
 which thread each posted comment replaced; the resolve step closes a thread on
 finding its id in that record. A harness that ran only one of them could not
 tell whether the record it wrote is the record the other reads.
 
-## How it works
-
-`extract.py` reads a step's `run:` block and the workflow's `FINDING_MARKER` out
-of the YAML on every run, so the harness tests the file as it stands. It runs
-twice, once per step, and the two markers are asserted equal: placement stamps a
-comment with it and the resolve step recognises a thread by it.
+The extractor runs twice, once per step, and the two `FINDING_MARKER` readings
+are asserted equal: placement stamps a comment with it and the resolve step
+recognises a thread by it.
 
 `bin/gh` goes on `PATH` ahead of the real `gh`. It logs every call, serves
 fixture JSON through the step's own `jq`, keeps the request body the step sent,
 and decides per case whether a call succeeds. `STUB_*` variables in `run_case`
 and `run_resolve` select the fixtures and the answers.
 
-## The fixtures
+### The fixtures
 
 `fx/files*.json` are `GET /compare` responses. One JSON object each: compare
 paginates its commits, and a second page carries no `files` key, so the step
@@ -59,7 +67,7 @@ because every body has to open with the marker the workflow defines now: two
 pages, and four threads that fail this step's own tests — the other identity, a
 foreign account, no marker, and a marker quoted mid-body.
 
-# The reaction steps
+## The reaction steps
 
 `reactions.sh` runs `Acknowledge the trigger`, `Answer the request` and
 `Withdraw the reactions on a cancelled run` against `bin-reactions/gh`, which keeps
@@ -89,7 +97,7 @@ later cancellation. And a run cancelled before it reached `Answer the request` t
 only the eyes: a thumb on the comment then belongs to an EARLIER run, whose verdict may
 still stand.
 
-# The step conditions
+## The step conditions
 
 `conditions.py` covers what a shell harness cannot see. A step condition decides which
 reaction step runs in which job state, and that is where the cancellation behaviour
@@ -118,3 +126,65 @@ step is not invisible to them, and both search the **whole step** rather than on
 
 No check needs telling where to look. A check that has to be pointed at a step is not
 stated over the file.
+
+## The guard, and the two steps that react
+
+Runs the request-admission path under `bash` against a `gh` stub of its own, and
+evaluates the shipped job conditions against synthetic event payloads. Five
+steps are read: `Refuse an event this workflow does not handle`, `parse`, `Admit
+the request`, `Acknowledge the trigger` and `Answer the request`.
+
+`gha.py` covers what a script harness cannot see. A job condition and a step's
+`env:` mapping are GitHub expressions, and both decide which payload field a
+request is read from, so both are evaluated here rather than restated. It models
+four GitHub semantics the conditions rest on — case-insensitive string
+comparison, `||` and `&&` yielding one operand each, **both short-circuiting**,
+and `contains` over an array testing membership — and `--selftest` checks each
+one. That model is read from GitHub's published expression semantics: nothing in
+this directory calls a runner.
+
+Short-circuiting is the one to be careful with. The runner's Or and And nodes
+return on the first truthy or falsy operand and never evaluate the rest, so a
+`fromJSON` an operand nothing reaches would refuse never runs. A model that
+evaluated eagerly reports a failure the runner does not have, and one assertion
+here stated the opposite of what a real event does before this was modelled.
+
+Four modes:
+
+```sh
+gha.py <workflow> <job> <context.json>          # the job's if:, as true or false
+gha.py --env <workflow> <step> <key> <ctx.json> # what a step's env key resolves to
+gha.py --input <workflow> <input> <field>       # a declared workflow_call input field
+gha.py --selftest                               # the expression model itself
+```
+
+One group reaches outside this file. `ai-assistant.yml` answers the same comments
+and reserves the exact `@seidroid review` body for the reviewer, so the last group
+evaluates that workflow's own reply condition beside the parse and records which
+tool answers each body. Every body is checked on all three comment events, because
+the assistant has a branch each and this workflow now answers all three: a helper
+naming one event would measure the division on the path that already had it and
+infer the two this workflow adds. Two bodies both tools answer; the group says
+which and why.
+
+`ai-assistant.yml` is in `workflow-test-self.yml`'s `paths:` filter for that
+reason. Without it an edit there breaks an invariant stated here, and the break
+lands on the next unrelated pull request that touches `seidroid-review.yml`.
+
+`bin-guard/gh` logs every call, serves the answer the case chose through the
+step's own `--jq` filter, and tells the fork check from the label check by the
+filter each sends. A failed read prints nothing and exits non-zero, which is the
+shape `Admit the request` is written against: it captures stdout, so an empty
+capture is what tells the fork check and the once-per-PR gate that nobody
+answered. `bin/gh` beside it files an error body instead, because the placement
+step reads one.
+
+### The fixtures
+
+There are none. A guard case turns on six payload fields and five API answers,
+so each is built in the run from `STUB_*` and context arguments, where the case
+that chose it can be read beside the assertion it drives.
+
+`STUB_TEAM`, `STUB_ORIGIN`, `STUB_LABELS`, `STUB_REVIEWS`, `STUB_COMMENTS` and
+`STUB_REACTIONS` choose what the stub answers; `FAIL` on any of them is a read
+that nobody answered.

@@ -9,3 +9,11 @@ ack.sh
 answer.sh
 withdraw.sh
 out-reactions/
+# Written by run-guard.sh: the five steps it extracts from the workflow. Two of
+# them are steps reactions.sh also extracts, under names of their own so neither
+# harness can overwrite the other's extraction.
+refuse.sh
+parse.sh
+admit.sh
+guard-ack.sh
+guard-answer.sh
