@@ -1,5 +1,6 @@
-# Written by run.sh: the step extracted from the workflow, the fixtures it
+# Written by run.sh: the two steps extracted from the workflow, the fixtures it
 # generates, and one directory of output per case.
 place.sh
+resolve.sh
 fx/gen/
 out/

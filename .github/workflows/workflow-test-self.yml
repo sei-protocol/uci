@@ -1,6 +1,10 @@
 name: Workflow tests
 # The shell and jq inside seidroid-review.yml, run against a gh stub. Nothing here
 # reaches the GitHub API, so this needs no token and no permissions.
+#
+# Two steps, one harness. Placement records which thread each posted comment
+# replaced and the resolve step closes on that record, so the pair is the behaviour
+# worth testing rather than either half.
 on:
   pull_request:
     paths:
@@ -17,7 +21,7 @@ permissions:
   contents: read
 jobs:
   place-findings:
-    name: Place findings on the code
+    name: Place findings and resolve threads
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -28,5 +32,5 @@ jobs:
           python-version: '3.x'
       - name: Install the YAML reader
         run: python3 -m pip install --quiet pyyaml
-      - name: Run the placement harness
+      - name: Run the placement and resolve harness
         run: test/seidroid-review/run.sh

@@ -5,6 +5,40 @@ log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
 argv=("$@")
 joined="$*"
 
+# --- resolve one review thread (the mutation) --------------------------------
+# Matched before the thread read, because only this one names the mutation.
+case "$joined" in
+  *resolveReviewThread*)
+    for ((i=0;i<${#argv[@]};i++)); do
+      case "${argv[i]}" in threadId=*) id="${argv[i]#threadId=}" ;; esac
+    done
+    log "CALL resolve ${id:-}"
+    case "${STUB_RESOLVE:-ok}" in
+      ok) printf '%s\n' '{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}'
+          exit 0 ;;
+      # gh splits a failure across both streams, which is why the step captures both.
+      403) printf '%s\n' '{"message":"Resource not accessible by integration"}'
+           echo 'gh: HTTP 403' >&2; exit 1 ;;
+      *) printf '%s\n' '{"message":"Could not resolve to a node"}'; exit 1 ;;
+    esac
+    ;;
+esac
+
+# --- read every page of the pull request's review threads --------------------
+case "$joined" in
+  *reviewThreads*)
+    log "CALL threads"
+    if [ "${STUB_THREADS:-}" = "FAIL" ]; then
+      echo 'gh: Bad credentials (HTTP 401)' >&2
+      exit 1
+    fi
+    # One JSON document per page, which is what --paginate writes and what the
+    # step's `jq -s` folds into one array.
+    cat "$STUB_THREADS"
+    exit 0
+    ;;
+esac
+
 # --- read the pull request object (base.sha and changed_files) ----------------
 case "$joined" in
   *"/pulls/$STUB_PR"|*"/pulls/$STUB_PR --jq"*)
