@@ -4,3 +4,8 @@ place.sh
 resolve.sh
 fx/gen/
 out/
+# Written by reactions.sh: the three reaction steps, and one directory per case.
+ack.sh
+answer.sh
+withdraw.sh
+out-reactions/

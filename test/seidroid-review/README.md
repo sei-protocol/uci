@@ -1,11 +1,18 @@
-# `Place findings on the code` and `Resolve the threads this review closed`
+# Workflow tests
 
-Runs both steps of `.github/workflows/seidroid-review.yml` under `bash`, against
-a `gh` stub, and checks what they posted, counted and closed.
+Two harnesses over `.github/workflows/seidroid-review.yml`. Both read the steps out
+of the YAML on every run, so neither can pass against a stale copy.
 
 ```sh
-test/seidroid-review/run.sh
+test/seidroid-review/run.sh        # placement and thread resolution
+test/seidroid-review/reactions.sh  # the three reaction steps
+python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
 ```
+
+# `Place findings on the code` and `Resolve the threads this review closed`
+
+Runs both steps under `bash`, against a `gh` stub, and checks what they posted,
+counted and closed.
 
 The run needs `bash`, `jq`, and `python3` with PyYAML. It exits non-zero on the
 first failed assertion count and prints a table of one row per case.
@@ -51,3 +58,25 @@ step has to act on. The review threads themselves are generated in `run.sh`,
 because every body has to open with the marker the workflow defines now: two
 pages, and four threads that fail this step's own tests — the other identity, a
 foreign account, no marker, and a marker quoted mid-body.
+
+# The reaction steps
+
+`reactions.sh` runs `Acknowledge the trigger`, `Answer the request` and
+`Withdraw the reactions on a cancelled run` against `bin-reactions/gh`, which keeps
+the reaction list a comment carries and serves it through the step's own `jq`. Each
+case reports the exact set left on the trigger comment.
+
+Two properties every case holds to. A human's reaction is never withdrawn. Neither is
+a reaction of this bot's that no step here chooses, so a `rocket` some other workflow
+left survives.
+
+`conditions.py` covers what a shell harness cannot see. A step condition decides which
+of these steps runs in which job state, and that is where the cancellation behaviour
+lives: `Answer the request` reads a conclusion and may thumb the request, so it must
+skip a cancelled run, and the withdrawal step must take it. The check is stated over
+the file as well as over a table -- no step that reads `check_path` or
+`verdict_produced` may run on a cancelled job -- so a step added later is covered.
+
+It models the runner's own rule that a condition naming none of
+`always`/`cancelled`/`failure`/`success` is stored as `success() && (...)`, and treats
+any term it does not decide as unknown rather than as false.

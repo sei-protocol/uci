@@ -58,7 +58,10 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 #     surfacing steps gate on whether a verdict was produced rather than on
 #     the exit code, so a review that reached one still posts it whatever else
 #     went wrong; `!cancelled()` rather than `success()` keeps that true while
-#     still skipping a run superseded by a newer trigger.
+#     still skipping a run superseded by a newer trigger. Every surfacing step
+#     skips such a run. One step does not, and it is the last in the job: it
+#     withdraws the reactions a cancelled run left on the trigger comment, and
+#     it reads no verdict, so it can state no outcome.
 #   - allow-tools is a workflow input, defaulting to Bash,Read because the
 #     prompt's first step is a shell command and a declined prompt therefore
 #     produces a turn that reports it could not read the diff. Its access
@@ -1027,8 +1030,9 @@ jobs:
           # the same comment returns the existing reaction rather than adding a
           # second one, so a retry needs no cleanup.
           #
-          # `Answer the request` withdraws this reaction, on every path it takes. A
-          # review that keeps it reads as a review that is still running.
+          # `Answer the request` withdraws this reaction on every path it takes, and the
+          # last step of the job withdraws it on the one path that step skips. A review
+          # that keeps it reads as a review that is still running.
           if gh api -X POST "repos/$REPO/issues/comments/$TRIGGER_ID/reactions" \
               -f content=eyes >/dev/null 2>&1; then
             echo "acknowledged comment $TRIGGER_ID"
@@ -2399,26 +2403,22 @@ jobs:
         # owed an answer even then. Everything here needs only GITHUB_TOKEN and the
         # job's issues: write.
         #
-        # The condition names two facts: a review turn, and a comment to answer. A
-        # close produces no verdict, so a request to tear a session down earns no
-        # answer.
+        # The condition names three facts: a review turn, not cancelled, and a comment
+        # to answer. A close produces no verdict, so a request to tear a session down
+        # earns no answer.
         #
-        # always(), where every other step in this job skips a cancelled run. A newer
-        # `@seidroid review` cancels the run in flight, and the eyes are on the older
-        # comment by then. The newer run answers its OWN comment id, so a step that
-        # skips on cancellation leaves that older request wearing eyes nothing clears.
-        #
-        # What always() admits is a run with no check file, and the missing-conclusion
-        # arm below already answers it: withdraw all three of this bot's reactions,
-        # post nothing. Cheap to admit. That arm spends four API calls and takes no
-        # position on the pull request. It starts none of the work a cancellation is
-        # there to stop. A runner shutdown skips every remaining condition, so nothing
-        # in this job survives that.
+        # !cancelled() is what keeps a thumb honest, and it is not interchangeable with
+        # always() here. A cancellation arriving after `drive` finishes leaves
+        # check_path and verdict_produced populated, so this step would read a real
+        # conclusion and thumb the request -- while `Post the verdict` below skips and
+        # the verdict never reaches the pull request. A thumb reads as an answer, so
+        # that is worse than no reaction at all. The last step of this job withdraws
+        # the eyes a cancelled run leaves, and it cannot reach a conclusion to post.
         #
         # No verdict_produced gate: the acknowledgement waits on this step, and a re-run
         # replays the trigger comment id, so a run reaching no verdict still has to clear
         # the eyes, and a thumb an earlier attempt left there.
-        if: ${{ inputs.mode == 'review' && always()
+        if: ${{ inputs.mode == 'review' && !cancelled()
           && needs.guard.outputs.comment_id != '' }}
         continue-on-error: true
         shell: bash
@@ -3174,3 +3174,68 @@ jobs:
           echo "--- report, unposted ---"
           printf '%s\n' "$body"
           echo "--- end report ---"
+
+      - name: Withdraw the reactions on a cancelled run
+        # The one step in this job that runs on a cancelled run, and the whole of what
+        # a cancelled run is allowed to do to the trigger comment: take this bot's own
+        # reactions off it and say nothing.
+        #
+        # A newer `@seidroid review` cancels the run in flight. The eyes are already on
+        # the older comment by then, and the newer run answers its OWN comment id, so
+        # nothing reads the older one again -- it would wear the eyes for good.
+        #
+        # It cannot post a thumb, and that is the point of it being a separate step
+        # rather than always() on the step above. It reads no check file, no
+        # verdict_produced and no conclusion, so there is no value a cancellation could
+        # leave populated that would make it state an outcome. A cancelled run publishes
+        # nothing, so any reaction it left would name a verdict that is not on the pull
+        # request.
+        #
+        # LAST in the job, deliberately. A step's condition is evaluated when the step
+        # is reached, so a clear placed earlier is already skipped by the time a
+        # cancellation lands on a later one -- and it would leave both the eyes and the
+        # thumb the step above had just posted. From here it also withdraws that thumb,
+        # so a cancellation arriving during or after `Answer the request` heals rather
+        # than leaving a verdict nobody published.
+        #
+        # cancelled() is only readable in a step or job `if`. It is not available in
+        # `env` or `run`, and a workflow carrying it there is rejected, so the job status
+        # cannot be handed to a shell and this decision cannot move inside one script.
+        if: ${{ inputs.mode == 'review' && cancelled()
+          && needs.guard.outputs.comment_id != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_REPO: ${{ github.repository }}
+          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+          # Scoped to the reacting identity, for the reason `Answer the request` states:
+          # a human who thumbed the request is voicing an opinion, and a cancellation is
+          # no licence to delete it. GITHUB_TOKEN reacts as github-actions[bot], and an
+          # installation token cannot ask the API which login it carries, so the login is
+          # named here.
+          me="github-actions[bot]"
+          # Listed into a variable and read from it rather than through a pipe, so
+          # nothing this block reports can be read back as a reaction id. Paginated,
+          # because a busy comment carries more reactions than one page holds.
+          if ! mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+                         --paginate \
+                         --jq ".[] | select(.user.login == \"$me\") | \"\\(.content) \\(.id)\"")"; then
+            echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; the eyes from this cancelled run may stay on it"
+            mine=""
+          fi
+          # Only the three this workflow ever posts. A reaction of this bot's that no
+          # step here chooses belongs to whatever put it there.
+          while read -r content rid; do
+            [ -n "$rid" ] || continue
+            case " +1 -1 eyes " in *" $content "*) ;; *) continue ;; esac
+            if gh api -X DELETE \
+                 "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
+                 >/dev/null; then
+              echo "withdrew this bot's $content from comment $TRIGGER_ID"
+            else
+              echo "::warning::could not withdraw this bot's $content from comment $TRIGGER_ID in $TRIGGER_REPO"
+            fi
+          done <<< "$mine"

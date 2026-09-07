@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# gh stub for the reaction steps: keeps a reaction list, serves it through the
+# step's own jq, and decides per case which calls succeed.
+#
+#   STUB_STATE    the reaction array this comment carries
+#   STUB_LOG      one line per call
+#   STUB_ACTOR    the login a POST reacts as
+#   STUB_LIST     ok | FAIL
+#   STUB_DELETE   ok | FAIL
+#   STUB_POST     ok | FAIL
+set -uo pipefail
+log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
+[ -s "$STUB_STATE" ] || echo '[]' > "$STUB_STATE"
+
+verb=GET path="" filter="" ; declare -a fields=()
+[ "${1:-}" = api ] && shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -X|--method) verb="$2"; shift 2 ;;
+    --jq) filter="$2"; shift 2 ;;
+    --paginate|--slurp) shift ;;
+    -f|--raw-field|--field) fields+=("$2"); shift 2 ;;
+    -H) shift 2 ;;
+    *) path="$1"; shift ;;
+  esac
+done
+
+case "$verb:$path" in
+  GET:*/reactions)
+    log "CALL list"
+    [ "${STUB_LIST:-ok}" = FAIL ] && exit 1
+    # Through the step's own filter, so the filter is under test and not the harness's
+    # idea of it.
+    if [ -n "$filter" ]; then jq -r "$filter" < "$STUB_STATE"; else cat "$STUB_STATE"; fi
+    ;;
+  DELETE:*/reactions/*)
+    rid="${path##*/}"
+    log "CALL delete $rid"
+    [ "${STUB_DELETE:-ok}" = FAIL ] && exit 1
+    jq -e --argjson rid "$rid" 'any(.[]; .id == $rid)' < "$STUB_STATE" > /dev/null || {
+      log "  no such reaction $rid"; exit 1; }
+    jq --argjson rid "$rid" '[.[] | select(.id != $rid)]' < "$STUB_STATE" > "$STUB_STATE.n"
+    mv "$STUB_STATE.n" "$STUB_STATE"
+    ;;
+  POST:*/reactions)
+    content=""
+    for f in "${fields[@]:-}"; do case "$f" in content=*) content="${f#content=}" ;; esac; done
+    log "CALL post $content"
+    [ "${STUB_POST:-ok}" = FAIL ] && exit 1
+    # Idempotent per (user, content): the API returns the reaction already there
+    # rather than adding a second one.
+    if jq -e --arg c "$content" --arg u "${STUB_ACTOR:-github-actions[bot]}" \
+         'any(.[]; .content == $c and .user.login == $u)' < "$STUB_STATE" > /dev/null; then
+      log "  already there"
+    else
+      next="$(jq '[.[].id] | max // 0 | . + 1' < "$STUB_STATE")"
+      jq --arg c "$content" --arg u "${STUB_ACTOR:-github-actions[bot]}" --argjson id "$next" \
+        '. + [{id: $id, content: $c, user: {login: $u}}]' < "$STUB_STATE" > "$STUB_STATE.n"
+      mv "$STUB_STATE.n" "$STUB_STATE"
+    fi
+    jq -c --arg c "$content" '[.[] | select(.content == $c)] | last' < "$STUB_STATE"
+    ;;
+  *)
+    log "CALL UNSTUBBED $verb $path"
+    echo "gh stub: unstubbed $verb $path" >&2
+    exit 64
+    ;;
+esac
