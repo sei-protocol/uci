@@ -343,24 +343,11 @@ on:
         required: false
         type: string
         default: ''
-      allow-policies:
-        description: >-
-          Comma-separated policy_name values the driver's permission policy
-          accepts automatically (see Policy.Decide in the driver's
-          internal/driver/policy.go, in sei-protocol/sei-internal-skills).
-          Prefer allow-tools: policy_name is claude_native_permission for
-          every native prompt (measured), so any value here accepts every tool
-          call rather than a class of them. Passed to the driver as
-          SEIDROID_ALLOW_POLICIES.
-        required: false
-        type: string
-        default: ''
       allow-tools:
         description: >-
           Comma-separated tool_name values to accept. This deployment does stamp
-          tool_name (measured), so this is the allowlist to prefer: it
-          discriminates per tool. Passed to the driver as
-          SEIDROID_ALLOW_TOOLS.
+          tool_name (measured), so this allowlist discriminates per tool. Passed
+          to the driver as SEIDROID_ALLOW_TOOLS.
 
           Defaults to `Bash,Read` because the review cannot happen without them.
           The prompt's first step is a `gh pr diff` command, so an empty allowlist
@@ -1496,7 +1483,6 @@ jobs:
           OMNIGENT_BASE_URL: ${{ inputs.omnigent-base-url }}
           SEIDROID_SCOUTS: ${{ inputs.scouts }}
           SEIDROID_MODEL: ${{ inputs.claude-model }}
-          SEIDROID_ALLOW_POLICIES: ${{ inputs.allow-policies }}
           SEIDROID_ALLOW_TOOLS: ${{ inputs.allow-tools }}
           MODE: ${{ inputs.mode }}
           # The reviewed pull request. The driver keys the session on this pair.
