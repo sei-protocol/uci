@@ -2403,7 +2403,7 @@ jobs:
         # close produces no verdict, so a request to tear a session down earns no
         # answer.
         #
-        # always(), where every other step in this job takes !cancelled(). A newer
+        # always(), where every other step in this job skips a cancelled run. A newer
         # `@seidroid review` cancels the run in flight, and the eyes are on the older
         # comment by then. The newer run answers its OWN comment id, so a step that
         # skips on cancellation leaves that older request wearing eyes nothing clears.
