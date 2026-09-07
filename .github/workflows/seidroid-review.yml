@@ -58,7 +58,10 @@ run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event
 #     surfacing steps gate on whether a verdict was produced rather than on
 #     the exit code, so a review that reached one still posts it whatever else
 #     went wrong; `!cancelled()` rather than `success()` keeps that true while
-#     still skipping a run superseded by a newer trigger.
+#     still skipping a run superseded by a newer trigger. Every surfacing step
+#     skips such a run. One step does not, and it is the last in the job: it
+#     withdraws the reactions a cancelled run left on the trigger comment, and
+#     it reads no verdict, so it can state no outcome.
 #   - allow-tools is a workflow input, defaulting to Bash,Read because the
 #     prompt's first step is a shell command and a declined prompt therefore
 #     produces a turn that reports it could not read the diff. Its access
@@ -974,7 +977,11 @@ jobs:
       contents: read         # read PR metadata
       checks: write          # publish the review's check runs
       # React to the triggering comment. A reaction on a PR comment goes to the
-      # ISSUE comments endpoint, which pull-requests: write does not cover.
+      # ISSUE comments endpoint, which pull-requests: write does not cover. GitHub's
+      # permission table grants that endpoint's POST and DELETE to Issues alone, and
+      # grants the comment itself to either scope, so the alias stops at the reaction.
+      # GraphQL addReaction is the other route to it, and GitHub documents no
+      # permission for any mutation, so only a live call settles what that route needs.
       issues: write          # acknowledge the trigger with a reaction
     # The credential lives ONLY here, at job level. It must never be re-declared
     # as step-level env on a `uses:` step (composite/action steps do not receive
@@ -1023,8 +1030,9 @@ jobs:
           # the same comment returns the existing reaction rather than adding a
           # second one, so a retry needs no cleanup.
           #
-          # `Answer the request` withdraws this reaction, on every path it takes. A
-          # review that keeps it reads as a review that is still running.
+          # `Answer the request` withdraws this reaction on every path it takes, and the
+          # last step of the job withdraws it on the one path that step skips. A review
+          # that keeps it reads as a review that is still running.
           if gh api -X POST "repos/$REPO/issues/comments/$TRIGGER_ID/reactions" \
               -f content=eyes >/dev/null 2>&1; then
             echo "acknowledged comment $TRIGGER_ID"
@@ -2386,6 +2394,9 @@ jobs:
           fi
 
       - name: Answer the request
+        # id: the withdrawal step at the end of this job reads this step's outcome to
+        # tell a run that already touched the trigger comment from one that never did.
+        id: answer
         # The verdict, on the comment that asked for it, so the person who asked reads
         # the outcome where they asked. The eyes at the top of this job say it started;
         # this step withdraws them and says how it ended.
@@ -2398,6 +2409,15 @@ jobs:
         # The condition names three facts: a review turn, not cancelled, and a comment
         # to answer. A close produces no verdict, so a request to tear a session down
         # earns no answer.
+        #
+        # !cancelled() is what keeps a thumb honest, and it is not interchangeable with
+        # always() here. A cancellation arriving after `drive` finishes leaves
+        # check_path and verdict_produced populated, so this step would read a real
+        # conclusion and thumb the request -- while `Post the verdict` below skips and
+        # the verdict never reaches the pull request. A thumb reads as an answer, so
+        # that is worse than no reaction at all. The last step of this job withdraws
+        # the eyes a cancelled run leaves, and it cannot reach a conclusion to post.
+        #
         # No verdict_produced gate: the acknowledgement waits on this step, and a re-run
         # replays the trigger comment id, so a run reaching no verdict still has to clear
         # the eyes, and a thumb an earlier attempt left there.
@@ -2504,6 +2524,9 @@ jobs:
           fi
 
       - name: Post the verdict
+        # id: the withdrawal step at the end of this job reads this step's `posted`
+        # output to decide whether the trigger comment already carries an honest answer.
+        id: verdict
         # Post only when a real verdict was produced, and even when the drive
         # step above exited non-zero -- `!cancelled()` runs on any outcome
         # except the job itself being cancelled (e.g. superseded by a newer
@@ -2708,6 +2731,13 @@ jobs:
           if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
             posted=true
           fi
+          # Whether the verdict is ON the pull request, for the withdrawal step at the
+          # end of this job: a thumb on the trigger comment answers a verdict only when
+          # the verdict is there to read. This step's exit status cannot carry that. The
+          # failure path below ends on a call whose failure it swallows, so the step
+          # exits 0 whether the comment landed or not, and its outcome reads success
+          # either way.
+          echo "posted=$posted" >> "$GITHUB_OUTPUT"
           if [ "$posted" = true ]; then
             echo "posted the verdict on $REPO#$PR"
             # An earlier run may have left a notice saying this review did not complete.
@@ -3157,3 +3187,124 @@ jobs:
           echo "--- report, unposted ---"
           printf '%s\n' "$body"
           echo "--- end report ---"
+
+      - name: Withdraw the reactions on a cancelled run
+        # The one step in this job that runs on a cancelled run, and the whole of what
+        # a cancelled run is allowed to do to the trigger comment: take this bot's own
+        # reactions off it and say nothing.
+        #
+        # A newer `@seidroid review` cancels the run in flight. The eyes are already on
+        # the older comment by then, and the newer run answers its OWN comment id, so
+        # nothing reads the older one again -- it would wear the eyes for good.
+        #
+        # THIS STEP HAS NO POST. It withdraws, and there is no code path in it that adds
+        # a reaction, so nothing it is told can make it state an outcome. That is what
+        # makes the withdrawal a step of its own rather than always() on `Answer the
+        # request`: that step chooses a reaction from a conclusion, and a cancellation
+        # arriving after the driver finishes leaves check_path and verdict_produced
+        # populated -- so it would read a real conclusion and thumb a review that
+        # published nothing.
+        #
+        # `Post the verdict` decides whether there is anything to withdraw, and the
+        # driver does not. A cancellation can arrive once the verdict is already on the
+        # pull request -- during thread resolution, say -- and the thumb `Answer the
+        # request` posted answers it correctly. Withdrawing it there leaves a published
+        # review with no reaction on the request that asked for it, which reads as never
+        # answered. That is this step's own defect, one window later.
+        #
+        # Its `posted` OUTPUT separates the two, and its outcome does not. That step
+        # tolerates a failed comment POST and ends on a call whose failure it swallows,
+        # so it exits 0 and reads success whether the verdict landed or not. A thumb kept
+        # on that reading would stand for a review nobody can see. The output is written
+        # from the POST's own result.
+        #
+        # One boolean about another step, with no conclusion in it. It says whether an
+        # answer already stands, never which answer it would be, so reading it cannot
+        # give this step an outcome to state. The same holds for the answer step's
+        # outcome, which the withdrawal set below reads.
+        #
+        # Anything but a posted verdict withdraws. A value this step cannot read
+        # therefore clears, rather than leaving a thumb that stands for a verdict which
+        # may not be on the pull request.
+        #
+        # WHAT IT PROTECTS, AND WHERE THAT STOPS. A thumb survives when the verdict it
+        # answers is on the pull request AND this run is the run that posted it, or when
+        # this run never reached the answer step at all. One case is left over: this run
+        # answers, which withdraws an earlier run's thumb and posts its own, and is then
+        # cancelled before publishing. The comment ends bare while the earlier run's
+        # verdict still stands. The earlier thumb is already gone by then -- the answer
+        # step took it -- so nothing here can put it back, and knowing it happened would
+        # take a read of the pull request this step deliberately does not make. A
+        # cancellation lands during the driver far more often than in that window.
+        #
+        # LAST in the job, deliberately. The runner evaluates a step's condition when it
+        # reaches the step, so a clear placed earlier is already skipped once a
+        # cancellation lands on a later one -- and it would leave both the eyes and the
+        # thumb the step above had just posted.
+        #
+        # cancelled() is only readable in a step or job `if`. It is not available in
+        # `env` or `run`, and a workflow carrying it there is rejected, so the job status
+        # cannot be handed to a shell and this decision cannot move inside one script.
+        if: ${{ inputs.mode == 'review' && cancelled()
+          && needs.guard.outputs.comment_id != ''
+          && steps.verdict.outputs.posted != 'true' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_REPO: ${{ github.repository }}
+          TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          # Whether this run ever reached the step that answers. See the withdrawal set
+          # below. Four words about another step; none of them a conclusion.
+          ANSWERED: ${{ steps.answer.outcome }}
+        run: |
+          set -euo pipefail
+          # Scoped to the reacting identity, for the reason `Answer the request` states:
+          # a human who thumbed the request is voicing an opinion, and a cancellation is
+          # no licence to delete it. GITHUB_TOKEN reacts as github-actions[bot], and an
+          # installation token cannot ask the API which login it carries, so the login is
+          # named here.
+          me="github-actions[bot]"
+          # WHAT THIS RUN MAY TAKE, and it is not always all three.
+          #
+          # A re-run replays the trigger comment id, so the comment can already carry a
+          # thumb from an earlier run whose verdict IS on the pull request. `Answer the
+          # request` withdraws that thumb and posts this run's own, so once it has run,
+          # every reaction on the comment belongs to this run and this run published
+          # nothing -- take all three.
+          #
+          # A run cancelled before it reached that step has posted only the eyes. A thumb
+          # there answers an earlier run, and taking it leaves that run's published
+          # verdict with no reaction on the request, which reads as never answered.
+          #
+          # skipped is the only value that means "never touched the comment". failure and
+          # cancelled both mean the step ran partway and most likely cleared the earlier
+          # thumb already, so they clear, and so does a value this step cannot read: a
+          # thumb this run posted for a verdict nobody published is the worse of the two
+          # wrongs.
+          case "${ANSWERED:-}" in
+            skipped) takeable=" eyes " ;;
+            *)       takeable=" +1 -1 eyes " ;;
+          esac
+          # Listed into a variable and read from it rather than through a pipe, so
+          # nothing this block reports can be read back as a reaction id. Paginated,
+          # because a busy comment carries more reactions than one page holds.
+          if ! mine="$(gh api "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions" \
+                         --paginate \
+                         --jq ".[] | select(.user.login == \"$me\") | \"\\(.content) \\(.id)\"")"; then
+            echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; the eyes from this cancelled run may stay on it"
+            mine=""
+          fi
+          # Only what this run may take. A reaction of this bot's outside that set
+          # belongs to whatever put it there.
+          while read -r content rid; do
+            [ -n "$rid" ] || continue
+            case "$takeable" in *" $content "*) ;; *) continue ;; esac
+            if gh api -X DELETE \
+                 "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
+                 >/dev/null; then
+              echo "withdrew this bot's $content from comment $TRIGGER_ID"
+            else
+              echo "::warning::could not withdraw this bot's $content from comment $TRIGGER_ID in $TRIGGER_REPO"
+            fi
+          done <<< "$mine"

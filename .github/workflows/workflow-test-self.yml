@@ -34,3 +34,25 @@ jobs:
         run: python3 -m pip install --quiet pyyaml
       - name: Run the placement and resolve harness
         run: test/seidroid-review/run.sh
+
+  # Its own job, so each check in the list names the step it covers. A job that runs
+  # both harnesses would report one name for two things, and the placement check would
+  # go red for a reaction.
+  reactions:
+    name: The reaction steps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install the YAML reader
+        run: python3 -m pip install --quiet pyyaml
+      - name: Run the reaction harness
+        run: test/seidroid-review/reactions.sh
+      # Which step runs in which job state, which is where the cancellation behaviour
+      # lives and which the shell harness above cannot see.
+      - name: Check the step conditions
+        run: python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
