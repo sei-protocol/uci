@@ -1,0 +1,5 @@
+# Written by run.sh: the step extracted from the workflow, the fixtures it
+# generates, and one directory of output per case.
+place.sh
+fx/gen/
+out/

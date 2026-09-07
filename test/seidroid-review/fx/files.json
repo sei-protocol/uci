@@ -1,0 +1,1 @@
+{"files":[{"filename":"pkg/a.go","patch":"@@ -10,4 +10,6 @@\n ctx10\n-gone11\n+added11\n+added12\n ctx13"},{"filename":"pkg/b.go","patch":"@@ -1,2 +1,3 @@\n one\n+two\n three"},{"filename":"assets/logo.png"},{"filename":"pkg/huge.go"}]}

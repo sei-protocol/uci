@@ -1,0 +1,5 @@
+pkg/a.go	RIGHT	11
+pkg/a.go	RIGHT	12
+pkg/b.go	RIGHT	2
+pkg/a.go	LEFT	11
+pkg/huge.go	RIGHT	120
