@@ -2394,6 +2394,9 @@ jobs:
           fi
 
       - name: Answer the request
+        # id: the withdrawal step at the end of this job reads this step's outcome to
+        # tell a run that already touched the trigger comment from one that never did.
+        id: answer
         # The verdict, on the comment that asked for it, so the person who asked reads
         # the outcome where they asked. The eyes at the top of this job say it started;
         # this step withdraws them and says how it ended.
@@ -3205,11 +3208,22 @@ jobs:
         # The posting step's OUTCOME is what separates the two, and it is four words
         # about another step: success, failure, cancelled or skipped. None of them names
         # a conclusion. It says whether an answer already stands, never which answer it
-        # would be, so reading it cannot give this step an outcome to state.
+        # would be, so reading it cannot give this step an outcome to state. The same
+        # holds for the answer step's outcome, which the withdrawal set below reads.
         #
         # Anything but success withdraws. An outcome this step cannot read therefore
         # clears, rather than leaving a thumb that stands for a verdict which may not be
         # on the pull request.
+        #
+        # WHAT IT PROTECTS, AND WHERE THAT STOPS. A thumb survives when the verdict it
+        # answers is on the pull request AND this run is the run that posted it, or when
+        # this run never reached the answer step at all. One case is left over: this run
+        # answers, which withdraws an earlier run's thumb and posts its own, and is then
+        # cancelled before publishing. The comment ends bare while the earlier run's
+        # verdict still stands. The earlier thumb is already gone by then -- the answer
+        # step took it -- so nothing here can put it back, and knowing it happened would
+        # take a read of the pull request this step deliberately does not make. A
+        # cancellation lands during the driver far more often than in that window.
         #
         # LAST in the job, deliberately. The runner evaluates a step's condition when it
         # reaches the step, so a clear placed earlier is already skipped once a
@@ -3228,6 +3242,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TRIGGER_REPO: ${{ github.repository }}
           TRIGGER_ID: ${{ needs.guard.outputs.comment_id }}
+          # Whether this run ever reached the step that answers. See the withdrawal set
+          # below. Four words about another step; none of them a conclusion.
+          ANSWERED: ${{ steps.answer.outcome }}
         run: |
           set -euo pipefail
           # Scoped to the reacting identity, for the reason `Answer the request` states:
@@ -3236,6 +3253,27 @@ jobs:
           # installation token cannot ask the API which login it carries, so the login is
           # named here.
           me="github-actions[bot]"
+          # WHAT THIS RUN MAY TAKE, and it is not always all three.
+          #
+          # A re-run replays the trigger comment id, so the comment can already carry a
+          # thumb from an earlier run whose verdict IS on the pull request. `Answer the
+          # request` withdraws that thumb and posts this run's own, so once it has run,
+          # every reaction on the comment belongs to this run and this run published
+          # nothing -- take all three.
+          #
+          # A run cancelled before it reached that step has posted only the eyes. A thumb
+          # there answers an earlier run, and taking it leaves that run's published
+          # verdict with no reaction on the request, which reads as never answered.
+          #
+          # skipped is the only value that means "never touched the comment". failure and
+          # cancelled both mean the step ran partway and most likely cleared the earlier
+          # thumb already, so they clear, and so does a value this step cannot read: a
+          # thumb this run posted for a verdict nobody published is the worse of the two
+          # wrongs.
+          case "${ANSWERED:-}" in
+            skipped) takeable=" eyes " ;;
+            *)       takeable=" +1 -1 eyes " ;;
+          esac
           # Listed into a variable and read from it rather than through a pipe, so
           # nothing this block reports can be read back as a reaction id. Paginated,
           # because a busy comment carries more reactions than one page holds.
@@ -3245,11 +3283,11 @@ jobs:
             echo "::warning::could not read the reactions on comment $TRIGGER_ID in $TRIGGER_REPO; the eyes from this cancelled run may stay on it"
             mine=""
           fi
-          # Only the three this workflow ever posts. A reaction of this bot's that no
-          # step here chooses belongs to whatever put it there.
+          # Only what this run may take. A reaction of this bot's outside that set
+          # belongs to whatever put it there.
           while read -r content rid; do
             [ -n "$rid" ] || continue
-            case " +1 -1 eyes " in *" $content "*) ;; *) continue ;; esac
+            case "$takeable" in *" $content "*) ;; *) continue ;; esac
             if gh api -X DELETE \
                  "repos/$TRIGGER_REPO/issues/comments/$TRIGGER_ID/reactions/$rid" \
                  >/dev/null; then

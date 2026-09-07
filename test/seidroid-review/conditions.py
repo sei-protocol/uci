@@ -28,12 +28,6 @@ import sys
 
 import yaml
 
-# step -> job state -> does it run? mode is 'review' with a comment id unless said.
-#
-# The cancelled column is the invariant. `Answer the request` reads check_path and
-# verdict_produced, and a cancellation arriving after the driver finishes leaves both
-# populated -- so a run of it on a cancelled job posts a thumb for a verdict that no
-# step published.
 # step -> (job state, mode, comment id, `Post the verdict` outcome) -> does it run?
 #
 # Two invariants live here. `Answer the request` reads check_path and verdict_produced,
@@ -265,6 +259,17 @@ def stored_condition(raw):
     return f"success() && ({expr})"
 
 
+def dump(step):
+    """The whole step as text. An inline ${{ }} in `run:`, `with:` or `if:` reaches the
+    same value an `env:` key would, so every check searches all of it."""
+    return yaml.safe_dump(step, default_flow_style=False)
+
+
+def label(step, index):
+    """What to call a step in a finding. A step need not have a name."""
+    return step.get("name") or step.get("uses") or f"step {index + 1}"
+
+
 REACTION_STEPS = (
     "Acknowledge the trigger",
     "Answer the request",
@@ -324,51 +329,57 @@ def main():
                 got,
             )
 
-    # A `steps.<id>.outcome` read only works when that id exists and belongs to an
-    # EARLIER step. Delete the id and the read is silently empty forever, which sends
-    # the withdrawal down its clearing path on every cancellation -- including the one
-    # where the verdict published and the thumb is honest. The model takes the outcome
-    # as an argument, so nothing above would notice.
-    print("== every steps.<id> a reaction step reads exists, and runs before it")
-    order = [s.get("name") for s in doc["jobs"]["review"]["steps"]]
-    ids = {
-        s["id"]: i
-        for i, s in enumerate(doc["jobs"]["review"]["steps"])
-        if s.get("id")
-    }
-    for name in EXPECTED:
-        if name not in steps:
-            continue
-        reader = order.index(name)
-        for ref in sorted(set(re.findall(r"steps\.([A-Za-z0-9_-]+)\.", str(steps[name].get("if", ""))))):
-            if ref not in ids:
-                check(f"{name} reads steps.{ref}, which is no step's id", True, False)
-            elif ids[ref] > reader:
-                check(f"{name} reads steps.{ref}, which runs later", True, False)
-            else:
-                check(f"{name} reads steps.{ref}", True, True)
+    # Both checks below walk the RAW steps list. Keying them off a name drops an
+    # unnamed step, and `- uses: actions/checkout@v7` with no `name:` is the usual
+    # shape -- so the very step most likely to arrive later would be the one the
+    # invariant could not see. The guard job already carries one unnamed step.
+    #
+    # Every job, not only `review`: a reaction step could be added anywhere, and a
+    # check that has to be told where to look is not stated over the file.
+    for job_name, job in doc["jobs"].items():
+        raw = job.get("steps") or []
+        ids = {st["id"]: i for i, st in enumerate(raw) if st.get("id")}
 
-    # Whatever the table above says, no step that can reach a conclusion may run on a
-    # cancelled job. This is the invariant, stated over the file rather than over the
-    # table, so a step added later is covered too.
-    print("== nothing that reads a conclusion runs on a cancelled run")
-    for name, step in steps.items():
-        expr = stored_condition(step.get("if", "success()"))
-        verdict = truthy(
-            Parser(
-                lex(expr), Ctx("cancelled", "review", "7", lenient=True)
-            ).parse()
-        )
-        # UNKNOWN counts as "can run": the check must not pass because a term went
-        # unmodelled.
-        runs = verdict is not False
-        haystack = yaml.safe_dump(step, default_flow_style=False)
-        reads = [k for k in CONCLUSION_INPUTS if k in haystack]
-        if runs and reads:
-            print(f"  FAIL {name} runs on a cancelled run and reads {', '.join(reads)}")
-            failed += 1
-        else:
-            passed += 1
+        # A steps.<id> read only works when that id exists and belongs to an EARLIER
+        # step. Delete the id, or move the reader in front of it, and the read is
+        # silently empty forever. The model takes an outcome as an argument, so nothing
+        # above would notice.
+        #
+        # The whole step, not its `if`: the withdrawal set reads an outcome through
+        # `env`, and `run:` and `with:` reach the same values.
+        print(f"== every steps.<id> read in job '{job_name}' exists, and runs before it")
+        for i, st in enumerate(raw):
+            where = label(st, i)
+            for ref in sorted(set(re.findall(r"steps\.([A-Za-z0-9_-]+)\.", dump(st)))):
+                if ref not in ids:
+                    check(f"{where} reads steps.{ref}, which is no step's id", True, False)
+                elif ids[ref] > i:
+                    check(f"{where} reads steps.{ref}, which runs later", True, False)
+                else:
+                    check(f"{where} reads steps.{ref}", True, True)
+
+        # No step that can run on a cancelled job may reach a conclusion, or a cancelled
+        # run can state an outcome. Stated over the file rather than over the table
+        # above, so a step added later is covered too.
+        print(f"== nothing in job '{job_name}' that reads a conclusion runs on a cancelled run")
+        for i, st in enumerate(raw):
+            where = label(st, i)
+            expr = stored_condition(st.get("if", "success()"))
+            outcome = truthy(
+                Parser(
+                    lex(expr), Ctx("cancelled", "review", "7", lenient=True)
+                ).parse()
+            )
+            # UNKNOWN counts as "can run": the check must not pass because a term went
+            # unmodelled.
+            runs = outcome is not False
+            reads = [k for k in CONCLUSION_INPUTS if k in dump(st)]
+            check(
+                f"{where}"
+                + (f" runs on a cancelled run and reads {', '.join(reads)}" if reads else ""),
+                True,
+                not (runs and reads),
+            )
 
     print(f"\nassertions: {passed} passed, {failed} failed")
     return 1 if failed else 0

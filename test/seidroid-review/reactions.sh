@@ -40,6 +40,9 @@ HUMAN_ALL='[{"id":21,"content":"+1","user":{"login":"brandon"}},
 STALE_DOWN='[{"id":31,"content":"-1","user":{"login":"github-actions[bot]"}},
              {"id":21,"content":"+1","user":{"login":"brandon"}}]'
 STALE_UP='[{"id":32,"content":"+1","user":{"login":"github-actions[bot]"}}]'
+# An EARLIER run's thumb, on a comment a re-run replays. Its verdict is on the pull
+# request, so it is not this run's to take.
+EARLIER_THUMB='[{"id":51,"content":"+1","user":{"login":"github-actions[bot]"}}]'
 # A reaction of this bot's that no step here ever chooses. Whatever put it there owns it.
 FOREIGN='[{"id":41,"content":"rocket","user":{"login":"github-actions[bot]"}},
           {"id":21,"content":"+1","user":{"login":"brandon"}}]'
@@ -66,6 +69,10 @@ run_case() {
   shift 8
   CASE="$HERE/out-reactions/$name"
   rm -rf "$CASE"; mkdir -p "$CASE"
+  # Every per-case knob is cleared here, not at the end of the case that set it. An
+  # export leaks to every later case otherwise, and a case that stops exercising what
+  # it claims fails nothing.
+  unset ANSWERED_AS ACK_POST SKIP_ACK
   export STUB_STATE="$CASE/reactions.json"; printf '%s\n' "$seed" > "$STUB_STATE"
   export STUB_LIST=ok STUB_DELETE=ok STUB_POST=ok STUB_ACTOR="$BOT"
   export PATH="$HERE/bin-reactions:$PATH"
@@ -104,6 +111,16 @@ run_case() {
     done < <($SELECT "$1" review 7 "$2")
   }
   run_selected "$answer_state" "$verdict_outcome" "Answer the request"
+  # The withdrawal reads the answer step's outcome to decide what it may take. Derived
+  # from whether the harness just ran that step, not passed in, so a case cannot claim
+  # an outcome the timeline it declared would not produce. ANSWERED_AS overrides it, for
+  # the arms a two-state timeline cannot reach.
+  if [ "$(ran 'Answer the request')" = 1 ]; then
+    ANSWERED="${ANSWERED_AS-success}"
+  else
+    ANSWERED="${ANSWERED_AS-skipped}"
+  fi
+  export ANSWERED
   run_selected "$state" "$verdict_outcome" "Withdraw the reactions on a cancelled run"
   echo "$rc" > "$CASE/rc"
 
@@ -167,6 +184,38 @@ check "withdraw skipped" 0 "$(ran 'Withdraw the reactions on a cancelled run')"
 check "one post, no later delete" "1 1" "$(calls post) $(calls delete)"
 check "THUMB SURVIVES"   "$BOT:+1" "$(left)"
 
+echo "== A RE-RUN REPLAYS THE TRIGGER COMMENT ID, so an earlier run's thumb can already"
+echo "   be on it. A run cancelled before it answers has posted only the eyes, and that"
+echo "   thumb answers a verdict still on the pull request. =="
+run_case rerun-cancelled-before-answer "$EARLIER_THUMB" cancelled cancelled skipped - '' no
+check "answer never ran"   0 "$(ran 'Answer the request')"
+check "withdraw ran"       1 "$(ran 'Withdraw the reactions on a cancelled run')"
+check "took the eyes only" 1 "$(calls delete)"
+check "EARLIER THUMB SURVIVES" "$BOT:+1" "$(left)"
+
+echo "== the same, beside a human's =="
+run_case rerun-cancelled-human \
+  '[{"id":51,"content":"+1","user":{"login":"github-actions[bot]"}},
+    {"id":23,"content":"-1","user":{"login":"brandon"}}]' \
+  cancelled cancelled skipped - '' no
+check "left"  "brandon:-1 $BOT:+1" "$(left)"
+
+echo "== but once this run has answered, every reaction on the comment is its own =="
+run_case rerun-answered-then-cancelled "$EARLIER_THUMB" success cancelled skipped success true yes
+check "answer ran"     1 "$(ran 'Answer the request')"
+check "withdraw ran"   1 "$(ran 'Withdraw the reactions on a cancelled run')"
+check "left"           "" "$(left)"
+
+echo "== a partial answer clears: it most likely took the earlier thumb already =="
+run_case rerun-answer-failed "$EARLIER_THUMB" cancelled cancelled skipped - '' no ANSWERED_AS=failure
+check "left"  "" "$(left)"
+run_case rerun-answer-cancelled "$EARLIER_THUMB" cancelled cancelled skipped - '' no ANSWERED_AS=cancelled
+check "left"  "" "$(left)"
+
+echo "== an outcome the step cannot read clears: a thumb standing for nothing is worse =="
+run_case rerun-answer-unreported "$EARLIER_THUMB" cancelled cancelled skipped - '' no ANSWERED_AS=
+check "left"  "" "$(left)"
+
 echo "== and it survives beside a human's reactions =="
 run_case cancelled-after-publish-human \
   '[{"id":21,"content":"-1","user":{"login":"brandon"}}]' \
@@ -183,11 +232,13 @@ check "left"  "brandon:+1 brandon:-1 brandon:eyes" "$(left)"
 run_case cancelled-human "$HUMAN_ALL" cancelled cancelled skipped success true yes
 check "left"  "brandon:+1 brandon:-1 brandon:eyes" "$(left)"
 
-echo "== a stale thumb from an earlier attempt goes, a human's stays =="
+echo "== a run that answers replaces the stale thumb; a human's stays =="
 run_case stale-thumb "$STALE_DOWN" success success success success true yes
 check "left"  "brandon:+1 $BOT:+1" "$(left)"
+
+echo "== a cancelled run that never answered leaves it: the earlier verdict may stand =="
 run_case stale-thumb-cancelled "$STALE_DOWN" cancelled cancelled skipped success true yes
-check "left"  "brandon:+1" "$(left)"
+check "left"  "brandon:+1 $BOT:-1" "$(left)"
 run_case stale-up-noverdict "$STALE_UP" success success skipped failure false yes
 check "left"  "" "$(left)"
 
@@ -222,7 +273,6 @@ check "rc"           0 "$(cat "$CASE/rc")"
 check "ack warned"   1 "$(grep -c '::warning::could not react to comment' "$CASE/ack.out")"
 check "nothing to clear" 0 "$(calls delete)"
 check "left"         "$BOT:+1" "$(left)"
-unset ACK_POST
 
 echo "== a close reacts nowhere, so nothing is left to clear =="
 CASE="$HERE/out-reactions/close-mode"; rm -rf "$CASE"; mkdir -p "$CASE"

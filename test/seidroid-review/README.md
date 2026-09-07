@@ -76,10 +76,12 @@ in. `success>cancelled` is a cancellation that arrived after the answer. The ans
 then posts its own thumb, so a late-cancellation case proves the outcome through the
 steps rather than placing a reaction by hand.
 
-Three properties every case holds to. A human's reaction is never withdrawn. Neither is
+Four properties every case holds to. A human's reaction is never withdrawn. Neither is
 a reaction of this bot's that no step here chooses, so a `rocket` some other workflow
-left survives. And a thumb that answers a verdict already on the pull request survives a
-later cancellation — withdrawing it would read as never answered.
+left survives. A thumb that answers a verdict already on the pull request survives a
+later cancellation. And a run cancelled before it reached `Answer the request` takes
+only the eyes: a thumb on the comment then belongs to an EARLIER run, whose verdict may
+still stand.
 
 # The step conditions
 
@@ -93,12 +95,16 @@ It models the runner's own rule that a condition naming none of
 `always`/`cancelled`/`failure`/`success` is stored as `success() && (...)`, and treats
 any term it does not decide as unknown rather than as false.
 
-Two checks are stated over the file rather than over a table, so a step added later is
-covered:
+Two checks are stated over the file rather than over a table, so they cover a step
+added later. Both walk **every job's raw steps list**, so an unnamed step is not
+invisible to them, and both search the **whole step** rather than one key:
 
 - No step that can run on a cancelled job may reach `check_path` or
-  `verdict_produced`. The haystack is the whole step, not its `env` block: an inline
-  `${{ steps.drive.outputs.check_path }}` in `run:`, `with:` or `if:` reaches the same
-  value.
-- Every `steps.<id>` a reaction step's condition reads must be a real id on an earlier
-  step. Delete the id and the read is empty forever, with no error anywhere.
+  `verdict_produced`. An inline `${{ steps.drive.outputs.check_path }}` in `run:`,
+  `with:` or `if:` reaches the same value an `env:` key would.
+- Every `steps.<id>` a step reads must be a real id on an earlier step. Delete the id,
+  or move the reader in front of it, and the read is empty forever with no error
+  anywhere — and a harness that takes the value as an argument cannot notice.
+
+Neither check needs telling where to look. A check that has to be pointed at a step is
+not stated over the file.
