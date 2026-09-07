@@ -1813,31 +1813,63 @@ jobs:
           # during the review does not move that merge base, because the reviewed
           # commit is fixed and the fork point with it.
           #
-          # Tested for the shape of a commit id, and not merely for emptiness. gh
-          # applies --jq to a success and writes the error object itself on a failure,
-          # so a refused read answers with a line of JSON on stdout and a non-zero
-          # status. Either one alone leaves that JSON in the variable and sends it to
-          # the API as a commit.
-          base_sha=""
+          # The pull request itself, read once for two fields: the commit its diff
+          # starts from, and how many files that diff has.
+          #
+          # Both tested for shape, and not merely for emptiness. A read that fails
+          # leaves the API's error object in the file, and a field that object does
+          # not carry reads as null -- which would otherwise reach the API as a
+          # commit id.
+          is_count() { case "${1:-}" in (''|*[!0-9]*) return 1 ;; esac; }
+          pull="$RUNNER_TEMP/review-pull.json"
+          base_sha="" changed_files=""
           if [ -n "$head_sha" ]; then
-            base_sha="$(gh api "repos/$REPO/pulls/$PR" --jq '.base.sha' 2>/dev/null)" || base_sha=""
+            if gh api "repos/$REPO/pulls/$PR" > "$pull" 2>/dev/null; then
+              base_sha="$(jq -r '.base.sha // "" | tostring' "$pull" 2>/dev/null || true)"
+              changed_files="$(jq -r '.changed_files // "" | tostring' "$pull" 2>/dev/null || true)"
+            fi
             case "$base_sha" in (''|*[!0-9a-f]*) base_sha="" ;; esac
+            is_count "$changed_files" || changed_files=""
             if [ -z "$base_sha" ]; then
               echo "::warning::the base commit of $REPO#$PR could not be read, so the diff at $head_sha cannot be; each finding is posted on its own"
             fi
           fi
-          # No --jq on the fetch. --paginate runs that filter once per page and would
-          # answer once per page. compare answers with an object per page rather than
-          # an array, so the pages are read for their files: merging two of these
-          # objects keeps one page's list and drops the other.
-          batched=false
-          if [ -n "$head_sha" ] && [ -n "$base_sha" ] \
-             && gh api --paginate "repos/$REPO/compare/$base_sha...$head_sha?per_page=100" > "$files.raw" \
-             && jq -s '[ .[] | (.files // [])[] ]' "$files.raw" > "$files" \
-             && jq --slurpfile findings "$normal" "$partition" "$files" > "$placement"; then
-            batched=true
-          elif [ -n "$head_sha" ]; then
+          # compare sends at most 300 files and drops the rest without saying so: no
+          # total, no Link header for them, no flag. Its pages are pages of commits,
+          # and a second page carries no files key at all, so there is nothing to page
+          # for. Measured: a 398-file pull request answers with 300.
+          #
+          # A short list cannot be told apart from a whole one, and a file missing
+          # from it looks exactly like a file the pull request never touched. Reading
+          # it as the diff would put a finding on its file under a body telling the
+          # author their cited line is outside a diff that holds it. So the list is
+          # counted against the pull request's own total, and a short one indexes
+          # nothing: every finding then goes to the API one at a time, which is the
+          # only thing that can still say where it belongs.
+          #
+          # 300 is that cap, so a list of 300 is at it. That test only has to carry
+          # the case where the total could not be read, because the total is exact.
+          build_index() {
+            local n
+            if gh api "repos/$REPO/compare/$base_sha...$head_sha?per_page=100" > "$files.raw" \
+               && jq '[ (.files // [])[] ]' "$files.raw" > "$files" \
+               && n="$(jq 'length' "$files")" && is_count "$n"; then
+              if [ -n "$changed_files" ] && [ "$n" -ne "$changed_files" ]; then
+                echo "::warning::the diff of $REPO#$PR at $head_sha came back with $n of its $changed_files file(s), so this run does not read it as the diff; each finding is posted on its own"
+                return 1
+              fi
+              if [ -z "$changed_files" ] && [ "$n" -ge 300 ]; then
+                echo "::warning::the diff of $REPO#$PR at $head_sha came back with $n file(s), which is all this endpoint sends, and the pull request's own total could not be read; each finding is posted on its own"
+                return 1
+              fi
+              jq --slurpfile findings "$normal" "$partition" "$files" > "$placement" && return 0
+            fi
             echo "::warning::the diff of $REPO#$PR at $head_sha could not be read, so each finding is posted on its own; the review still reaches the code"
+            return 1
+          }
+          batched=false
+          if [ -n "$head_sha" ] && [ -n "$base_sha" ] && build_index; then
+            batched=true
           fi
 
           if [ "$batched" = true ]; then
@@ -1856,17 +1888,23 @@ jobs:
                                | {path: .file, line: .line, side: .side,
                                   body: "\($marker)\n**\(.severity)** — \(.detail)"} ]}' \
                  "$placement" > "$request"
-              # Two failures, two answers. A 422 is the API refusing the content and
+              # Two failures, two answers. A 4xx is the API refusing the request and
               # it creates nothing, so each finding is posted on its own and the one
-              # line that was refused costs only itself. Any other failure may be a
-              # write that landed and then lost its connection, and repeating it
-              # posts the review twice -- so those findings take the summary, where
-              # the reader still gets every one of them.
+              # comment that was refused costs only itself. This request carries every
+              # finding's whole detail, which is model prose under no length bound, so
+              # the size of it is refused as readily as the content: 413 and 422 are
+              # the same answer here, and so is a 403 the retry can still get past one
+              # comment at a time.
+              #
+              # Any other failure may be a write that landed and then lost its
+              # connection, and repeating it posts the review twice -- so those
+              # findings take the summary, where the reader still gets every one of
+              # them.
               #
               # The code comes from the response's own status line, which -i puts
               # first, and not from a status field in the error body. GitHub's
-              # validation-error schema declares no such field, and a 422 that
-              # carries none would read as "not 422" and send every anchorable
+              # validation-error schema declares no such field, and a refusal that
+              # carries none would read as no refusal at all and send every anchorable
               # finding to the summary -- worse than placing each one by hand, which
               # is what this rung is for.
               #
@@ -1878,13 +1916,14 @@ jobs:
                 echo "posted one review carrying $anchored comment(s) on $REPO#$PR"
               else
                 status="$(sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' "$response" || true)"
-                if [ "$status" = "422" ]; then
-                  echo "::warning::$REPO#$PR refused the review carrying $anchored comment(s); each finding is posted on its own instead"
-                  place_each place_one to_summary_ondiff < <(rows '.anchored[]' "$placement")
-                else
-                  echo "::warning::the review carrying $anchored comment(s) could not be posted on $REPO#$PR; those findings are in the summary instead of on the diff"
-                  place_each to_summary_ondiff '' < <(rows '.anchored[]' "$placement")
-                fi
+                case "$status" in
+                  4??)
+                    echo "::warning::$REPO#$PR refused the review carrying $anchored comment(s) with $status; each finding is posted on its own instead"
+                    place_each place_one to_summary_ondiff < <(rows '.anchored[]' "$placement") ;;
+                  *)
+                    echo "::warning::the review carrying $anchored comment(s) could not be posted on $REPO#$PR; those findings are in the summary instead of on the diff"
+                    place_each to_summary_ondiff '' < <(rows '.anchored[]' "$placement") ;;
+                esac
               fi
             fi
             place_each place_one to_summary < <(rows '.unknown[]' "$placement")
