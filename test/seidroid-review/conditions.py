@@ -28,6 +28,10 @@ import sys
 
 import yaml
 
+# One name for the step, so the case table, the selector and the position check below
+# cannot disagree about which step they mean.
+WITHDRAW = "Withdraw the reactions on a cancelled run"
+
 # step -> (job state, mode, comment id, `Post the verdict` posted?) -> does it run?
 #
 # Two invariants live here. `Answer the request` reads check_path and verdict_produced,
@@ -54,7 +58,7 @@ EXPECTED = {
         ("success", "close", "7", ""): False,
         ("cancelled", "close", "7", ""): False,
     },
-    "Withdraw the reactions on a cancelled run": {
+    WITHDRAW: {
         # Nothing to withdraw on a run that was not cancelled.
         ("success", "review", "7", "true"): False,
         ("failure", "review", "7", "false"): False,
@@ -282,7 +286,7 @@ def label(step, index):
 REACTION_STEPS = (
     "Acknowledge the trigger",
     "Answer the request",
-    "Withdraw the reactions on a cancelled run",
+    WITHDRAW,
 )
 
 
@@ -337,6 +341,16 @@ def main():
                 want,
                 got,
             )
+
+    # The withdrawal has to be the LAST step of the review job, and that is not a
+    # tidiness preference. The runner evaluates a condition when it reaches the step, so
+    # any step placed after this one is a step during which a cancellation leaves the
+    # eyes standing: the withdrawal was already evaluated and skipped by then. Checking
+    # the position rather than mutating one ordering covers a step appended later.
+    print("== the withdrawal is the last step of the review job")
+    review_steps = doc["jobs"]["review"]["steps"]
+    last = label(review_steps[-1], len(review_steps) - 1)
+    check(f"last step is the withdrawal, not {last!r}", WITHDRAW, last)
 
     # Both checks below walk the RAW steps list. Keying them off a name drops an
     # unnamed step, and `- uses: actions/checkout@v7` with no `name:` is the usual

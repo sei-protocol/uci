@@ -95,15 +95,15 @@ still stand.
 reaction step runs in which job state, and that is where the cancellation behaviour
 lives. `Answer the request` reads a conclusion and may thumb the request, so it must
 skip a cancelled run. The withdrawal step must take a cancelled run, unless
-`Post the verdict` already completed.
+`Post the verdict` landed its comment.
 
 It models the runner's own rule that a condition naming none of
 `always`/`cancelled`/`failure`/`success` is stored as `success() && (...)`, and treats
 any term it does not decide as unknown rather than as false.
 
-Two checks are stated over the file rather than over a table, so they cover a step
-added later. Both walk **every job's raw steps list**, so an unnamed step is not
-invisible to them, and both search the **whole step** rather than one key:
+Three checks are stated over the file rather than over a table, so they cover a step
+added later. The two that walk steps walk **every job's raw steps list**, so an unnamed
+step is not invisible to them, and both search the **whole step** rather than one key:
 
 - No step that can run on a cancelled job may reach `check_path` or
   `verdict_produced`. An inline `${{ steps.drive.outputs.check_path }}` in `run:`,
@@ -111,6 +111,10 @@ invisible to them, and both search the **whole step** rather than one key:
 - Every `steps.<id>` a step reads must be a real id on an earlier step. Delete the id,
   or move the reader in front of it, and the read is empty forever with no error
   anywhere — and a harness that takes the value as an argument cannot notice.
+- The withdrawal is the **last** step of the review job. The runner evaluates a
+  condition when it reaches the step, so any step after the withdrawal is a step during
+  which a cancellation leaves the eyes standing. Checking the position covers a step
+  appended later; mutating one ordering would not.
 
-Neither check needs telling where to look. A check that has to be pointed at a step is
-not stated over the file.
+No check needs telling where to look. A check that has to be pointed at a step is not
+stated over the file.
