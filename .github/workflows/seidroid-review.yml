@@ -974,7 +974,11 @@ jobs:
       contents: read         # read PR metadata
       checks: write          # publish the review's check runs
       # React to the triggering comment. A reaction on a PR comment goes to the
-      # ISSUE comments endpoint, which pull-requests: write does not cover.
+      # ISSUE comments endpoint, which pull-requests: write does not cover. GitHub's
+      # permission table grants that endpoint's POST and DELETE to Issues alone, and
+      # grants the comment itself to either scope, so the alias stops at the reaction.
+      # GraphQL addReaction is the other route to it, and GitHub documents no
+      # permission for any mutation, so only a live call settles what that route needs.
       issues: write          # acknowledge the trigger with a reaction
     # The credential lives ONLY here, at job level. It must never be re-declared
     # as step-level env on a `uses:` step (composite/action steps do not receive
@@ -2395,13 +2399,26 @@ jobs:
         # owed an answer even then. Everything here needs only GITHUB_TOKEN and the
         # job's issues: write.
         #
-        # The condition names three facts: a review turn, not cancelled, and a comment
-        # to answer. A close produces no verdict, so a request to tear a session down
-        # earns no answer.
+        # The condition names two facts: a review turn, and a comment to answer. A
+        # close produces no verdict, so a request to tear a session down earns no
+        # answer.
+        #
+        # always(), where every other step in this job takes !cancelled(). A newer
+        # `@seidroid review` cancels the run in flight, and the eyes are on the older
+        # comment by then. The newer run answers its OWN comment id, so a step that
+        # skips on cancellation leaves that older request wearing eyes nothing clears.
+        #
+        # What always() admits is a run with no check file, and the missing-conclusion
+        # arm below already answers it: withdraw all three of this bot's reactions,
+        # post nothing. Cheap to admit. That arm spends four API calls and takes no
+        # position on the pull request. It starts none of the work a cancellation is
+        # there to stop. A runner shutdown skips every remaining condition, so nothing
+        # in this job survives that.
+        #
         # No verdict_produced gate: the acknowledgement waits on this step, and a re-run
         # replays the trigger comment id, so a run reaching no verdict still has to clear
         # the eyes, and a thumb an earlier attempt left there.
-        if: ${{ inputs.mode == 'review' && !cancelled()
+        if: ${{ inputs.mode == 'review' && always()
           && needs.guard.outputs.comment_id != '' }}
         continue-on-error: true
         shell: bash
