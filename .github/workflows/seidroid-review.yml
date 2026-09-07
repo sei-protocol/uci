@@ -346,9 +346,8 @@ on:
       allow-tools:
         description: >-
           Comma-separated tool_name values to accept. This deployment does stamp
-          tool_name (measured), so this is the allowlist to prefer: it
-          discriminates per tool. Passed to the driver as
-          SEIDROID_ALLOW_TOOLS.
+          tool_name (measured), so this allowlist discriminates per tool. Passed
+          to the driver as SEIDROID_ALLOW_TOOLS.
 
           Defaults to `Bash,Read` because the review cannot happen without them.
           The prompt's first step is a `gh pr diff` command, so an empty allowlist
