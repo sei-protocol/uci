@@ -1340,9 +1340,9 @@ jobs:
           # re-review closes where v0.14.0 carries none; v0.16.0 bounds the prior-thread
           # history by bytes where v0.15.0 bounds it by a count; and v0.17.0 names which
           # thread each finding replaces, which is what lets the resolve step below close
-          # a thread only once its own replacement reached the code. A merge gate keyed
-          # on one of
-          # those is wrong for the others, so this file serves one and refuses the rest.
+          # a thread only once its own replacement reached the code. A merge gate keyed on
+          # one of those is wrong for the others, so this file serves one and refuses the
+          # rest.
           #
           # Move this with the driver-version default above: one value in two places,
           # and nothing enforces it. The two mistakes are not symmetric. Raising this
