@@ -103,14 +103,14 @@ on:
 
           The module is nested, so the repository carries path-prefixed tags
           (sei-agent-driver/vX.Y.Z) while `go install` takes the bare version. Pass
-          `v0.15.0`; `sei-agent-driver/v0.15.0` is refused as a disallowed version
+          `v0.17.0`; `sei-agent-driver/v0.17.0` is refused as a disallowed version
           string. A commit sha resolves to a pseudo-version.
 
           Verify a pin from an EMPTY module cache: a warm one is a false green, because
           it resolves a pin the proxy may never have served.
         required: false
         type: string
-        default: 'v0.15.0'
+        default: 'v0.17.0'
       trigger-phrase:
         description: >-
           The mention a person types to ask for a review. The command is that phrase
@@ -1336,9 +1336,13 @@ jobs:
           # behind it. The conclusion a review reaches for a given set of findings is
           # specific to the driver that reached it -- v0.12.0 concludes `success` where
           # v0.11.0 concludes `neutral`; v0.14.0 writes a `failure` check for a run that
-          # reaches no verdict where v0.13.0 writes none; and v0.15.0 carries the threads
-          # a re-review closes where v0.14.0 carries none. A merge gate keyed on one of
-          # those is wrong for the others, so this file serves one and refuses the rest.
+          # reaches no verdict where v0.13.0 writes none; v0.15.0 carries the threads a
+          # re-review closes where v0.14.0 carries none; v0.16.0 bounds the prior-thread
+          # history by bytes where v0.15.0 bounds it by a count; and v0.17.0 names which
+          # thread each finding replaces, which is what lets the resolve step below close
+          # a thread only once its own replacement reached the code. A merge gate keyed on
+          # one of those is wrong for the others, so this file serves one and refuses the
+          # rest.
           #
           # Move this with the driver-version default above: one value in two places,
           # and nothing enforces it. The two mistakes are not symmetric. Raising this
@@ -1346,7 +1350,7 @@ jobs:
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
-          MIN_DRIVER_VERSION: 'v0.15.0'
+          MIN_DRIVER_VERSION: 'v0.17.0'
         run: |
           set -euo pipefail
           # An input default applies only when the caller omits the key. A caller that
@@ -1362,7 +1366,7 @@ jobs:
           #
           # The driver is a NESTED module. The repository carries path-prefixed tags
           # (sei-agent-driver/vX.Y.Z) and `go install` refuses one as a disallowed
-          # version string; what it takes is the bare version, `v0.15.0`. A sha becomes
+          # version string; what it takes is the bare version, `v0.17.0`. A sha becomes
           # a pseudo-version.
           out="$RUNNER_TEMP/bin"
           GOBIN="$out" go install \
