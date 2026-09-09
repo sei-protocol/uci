@@ -388,11 +388,15 @@ on:
       claude-model:
         description: >-
           Model to answer the review on, substituting for the one the agent's spec
-          names. The default pins Opus 5. Set it empty to leave the spec's own.
-          Passed to the driver as SEIDROID_MODEL.
+          names. The default pins Opus 5 with the 1M context window. Set it empty
+          to leave the spec's own. Passed to the driver as SEIDROID_MODEL.
 
           The pin exists because the runner otherwise launches on the Claude CLI's
           own default, which moves on a base image rebuild with no change here.
+
+          The [1m] suffix is load-bearing, not decoration: it selects the 1M
+          context build. The unsuffixed id runs the standard window, which a
+          review of a long diff compacts into sooner and reads less of.
 
           The server forwards the value as-is and enumerates nothing, so an
           unrecognised name is not rejected here or at configuration time -- it
@@ -402,7 +406,7 @@ on:
           so another harness and another provider, and it keeps its spec's model.
         required: false
         type: string
-        default: 'claude-opus-5'
+        default: 'claude-opus-5[1m]'
       allow-tools:
         description: >-
           Comma-separated tool_name values to accept. This deployment does stamp
