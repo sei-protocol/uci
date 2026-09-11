@@ -71,6 +71,11 @@ jobs:
       # lives and which the shell harness above cannot see.
       - name: Check the step conditions
         run: python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
+      # The two time limits, against each other and against a measured review. Neither
+      # a budget the reviews of the day already reach nor a job cap under it stops the
+      # workflow parsing, and both publish nothing a reader can act on.
+      - name: Check the review's time limits
+        run: python3 test/seidroid-review/deadline.py .github/workflows/seidroid-review.yml
 
   guard-admission:
     name: Guard the request

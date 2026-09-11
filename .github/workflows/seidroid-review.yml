@@ -103,14 +103,14 @@ on:
 
           The module is nested, so the repository carries path-prefixed tags
           (sei-agent-driver/vX.Y.Z) while `go install` takes the bare version. Pass
-          `v0.18.0`; `sei-agent-driver/v0.18.0` is refused as a disallowed version
+          `v0.19.0`; `sei-agent-driver/v0.19.0` is refused as a disallowed version
           string. A commit sha resolves to a pseudo-version.
 
           Verify a pin from an EMPTY module cache: a warm one is a false green, because
           it resolves a pin the proxy may never have served.
         required: false
         type: string
-        default: 'v0.18.0'
+        default: 'v0.19.0'
       trigger-phrase:
         description: >-
           The mention a person types to ask for a review. The command is that phrase
@@ -294,13 +294,35 @@ on:
         default: ''
       timeout-minutes:
         description: >-
-          Cap on the review job. Keep it comfortably above the driver's own
-          SEIDROID_RUN_DEADLINE_S: the driver reports a timeout and the reason it
-          hit one, where the runner killing the job leaves an annotation saying
-          only that the job was cancelled.
+          Cap on the review job. Keep it comfortably above `run-deadline-seconds`:
+          the driver reports a timeout and the reason it hit one, where the runner
+          killing the job leaves an annotation saying only that the job was
+          cancelled.
+
+          The margin is not decoration. A review costs more wall-clock than its own
+          deadline -- the scout pass, the sandbox launches, the install and the
+          publish steps all sit outside it -- so a cap set AT the deadline turns the
+          driver's own report into a runner cancellation. 60 minutes clears the 1800s
+          default with room for that overhead.
         required: false
         type: number
-        default: 45
+        default: 60
+      run-deadline-seconds:
+        description: >-
+          How long the driver gives one review before it gives up, as
+          SEIDROID_RUN_DEADLINE_S. Its own default was 1200s, which reviews were
+          reaching: measured on sei-protocol/platform, two runs exceeded it and
+          published no verdict at all, while ordinary ones landed at 943s and 1029s
+          -- 79% and 86% of the ceiling.
+
+          A review that crosses this posts nothing. Not a failing check a reader can
+          act on: no verdict, no findings, and a pull request that looks unreviewed
+          rather than looking broken. Raise it before lowering what a review reads.
+
+          Keep `timeout-minutes` above it; the note there says why.
+        required: false
+        type: number
+        default: 1800
       runs-on:
         description: >-
           Runner label for the review job. Defaults to a GitHub-hosted runner,
@@ -1357,7 +1379,7 @@ jobs:
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
-          MIN_DRIVER_VERSION: 'v0.18.0'
+          MIN_DRIVER_VERSION: 'v0.19.0'
         run: |
           set -euo pipefail
           # An input default applies only when the caller omits the key. A caller that
@@ -1373,7 +1395,7 @@ jobs:
           #
           # The driver is a NESTED module. The repository carries path-prefixed tags
           # (sei-agent-driver/vX.Y.Z) and `go install` refuses one as a disallowed
-          # version string; what it takes is the bare version, `v0.18.0`. A sha becomes
+          # version string; what it takes is the bare version, `v0.19.0`. A sha becomes
           # a pseudo-version.
           out="$RUNNER_TEMP/bin"
           GOBIN="$out" go install \
@@ -1786,6 +1808,11 @@ jobs:
           GUIDELINES_FILE: ${{ inputs.guidelines-file }}
           EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
           INCLUDE_NITS: ${{ steps.nits.outputs.include_nits }}
+          # The driver's own budget for this review. It bounds the step below and
+          # nothing else: the scout pass, the sandbox launches and the publish steps
+          # are outside it, which is why the job cap has to sit above it rather than
+          # at it.
+          SEIDROID_RUN_DEADLINE_S: ${{ inputs.run-deadline-seconds }}
         run: |
           set -euo pipefail
           # OMNIGENT_MACHINE_CLIENT_ID/SECRET are already in the job env (see

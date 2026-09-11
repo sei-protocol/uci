@@ -1,6 +1,6 @@
 # Workflow tests
 
-Three harnesses over `.github/workflows/seidroid-review.yml`. All three read the
+Four harnesses over `.github/workflows/seidroid-review.yml`. All four read the
 steps out of the YAML on every run, so none can pass against a stale copy.
 
 ```sh
@@ -8,6 +8,7 @@ test/seidroid-review/run.sh        # placement and thread resolution
 test/seidroid-review/reactions.sh  # the three reaction steps
 test/seidroid-review/run-guard.sh  # the guard, and the reaction collection
 python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
+python3 test/seidroid-review/deadline.py   .github/workflows/seidroid-review.yml
 ```
 
 Each needs `bash`, `jq`, and `python3` with PyYAML, and exits non-zero on the
@@ -188,3 +189,28 @@ that chose it can be read beside the assertion it drives.
 `STUB_TEAM`, `STUB_ORIGIN`, `STUB_LABELS`, `STUB_REVIEWS`, `STUB_COMMENTS` and
 `STUB_REACTIONS` choose what the stub answers; `FAIL` on any of them is a read
 that nobody answered.
+## The review's time limits
+
+`deadline.py` states the relationship between the driver's own budget
+(`run-deadline-seconds`, handed over as `SEIDROID_RUN_DEADLINE_S`) and the job cap
+(`timeout-minutes`). Both are numbers in a file that parses either way, and getting
+either wrong publishes nothing a reader can act on.
+
+A budget the reviews of the day are already reaching produces no verdict at all --
+not a failing check: no findings, and a pull request that reads as unreviewed rather
+than as broken. Two runs on `sei-protocol/platform` did exactly that against the
+driver's old 1200s default, while ordinary reviews landed at 943s and 1029s. So the
+budget is held to 1.5x the longest turn measured there, and that measurement is named
+in the file rather than folded into the threshold.
+
+A job cap at or under the budget is the same failure from the other side. A review
+costs more wall-clock than its own deadline -- the scout pass, two sandbox launches,
+the driver install and the publish steps all sit outside it -- so the runner kills the
+job before the driver can report why it timed out, and the annotation says only that
+the job was cancelled. The cap is held to 1.4x the budget.
+
+The last check is the one `seidroid-review.yml`'s own comment asks for and nothing
+enforced: `MIN_DRIVER_VERSION` and the `driver-version` default are one version in two
+places. Raising the floor alone fails every caller that omits the input, at once and in
+the open. Raising the default alone leaves a floor admitting a driver this file no
+longer drives, and says nothing while it happens.
