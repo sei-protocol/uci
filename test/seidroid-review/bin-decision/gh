@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# gh stub for decision.sh: records the review event posted, and serves an empty
+# withdrawal list so the loop after it has nothing to dismiss.
+#
+# Only the reviews POST is asserted on. The list and the dismissal exist so the
+# step reaches its end under `set -e` rather than dying on an unstubbed call --
+# a step that exited early would pass this harness by never posting at all.
+joined="$*"
+case "$joined" in
+  *"-X POST"*"/reviews"*)
+    for a in "$@"; do
+      case "$a" in event=*) printf 'POST %s\n' "${a#event=}" >> "$STUB_LOG" ;; esac
+    done
+    case "${STUB_POST:-ok}" in
+      ok)  printf '{"id":1}\n'; exit 0 ;;
+      # GitHub answers a self-review with 422, which is the only code the step
+      # downgrades on. The error object carries `status`; gh's own line does not.
+      422) printf '{"message":"Review Can not approve your own pull request","status":"422"}\n'; exit 1 ;;
+      *)   printf '{"message":"boom","status":"500"}\n'; exit 1 ;;
+    esac ;;
+  *"-X PUT"*dismissals*) printf 'dismissed\n' >> "$STUB_LOG"; exit 0 ;;
+  *"/reviews"*)
+    # The withdrawal's list. STUB_STANDING is the id of a CHANGES_REQUESTED review
+    # this tool left earlier; empty means there is no block to clear. The step reads
+    # ids one per line, so this prints the id and nothing else.
+    printf 'LIST\n' >> "$STUB_LOG"
+    [ -n "${STUB_STANDING:-}" ] && printf '%s\n' "$STUB_STANDING"
+    exit 0 ;;
+  *) printf 'UNSTUBBED %s\n' "$joined" >> "$STUB_LOG"; exit 1 ;;
+esac

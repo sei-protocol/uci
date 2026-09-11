@@ -103,14 +103,14 @@ on:
 
           The module is nested, so the repository carries path-prefixed tags
           (sei-agent-driver/vX.Y.Z) while `go install` takes the bare version. Pass
-          `v0.19.0`; `sei-agent-driver/v0.19.0` is refused as a disallowed version
+          `v0.20.0`; `sei-agent-driver/v0.20.0` is refused as a disallowed version
           string. A commit sha resolves to a pseudo-version.
 
           Verify a pin from an EMPTY module cache: a warm one is a false green, because
           it resolves a pin the proxy may never have served.
         required: false
         type: string
-        default: 'v0.19.0'
+        default: 'v0.20.0'
       trigger-phrase:
         description: >-
           The mention a person types to ask for a review. The command is that phrase
@@ -1379,7 +1379,12 @@ jobs:
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
-          MIN_DRIVER_VERSION: 'v0.19.0'
+          # v0.20.0 is load-bearing in a way the list above does not cover. The
+          # position step submits `.decision` from the check file, only v0.20.0 and
+          # later write it, and a file without it costs the review its position AND
+          # its withdrawal. An older driver reaching the review path would take both
+          # silently, which is why the floor is the gate rather than a default.
+          MIN_DRIVER_VERSION: 'v0.20.0'
         run: |
           set -euo pipefail
           # An input default applies only when the caller omits the key. A caller that
@@ -1395,7 +1400,7 @@ jobs:
           #
           # The driver is a NESTED module. The repository carries path-prefixed tags
           # (sei-agent-driver/vX.Y.Z) and `go install` refuses one as a disallowed
-          # version string; what it takes is the bare version, `v0.19.0`. A sha becomes
+          # version string; what it takes is the bare version, `v0.20.0`. A sha becomes
           # a pseudo-version.
           out="$RUNNER_TEMP/bin"
           GOBIN="$out" go install \
@@ -1457,7 +1462,7 @@ jobs:
           missing=""
           for flag in --out --findings-out --check-out --close --conversation-context \
                       --guidelines-file --extra-instructions --include-nits \
-                      --trigger-id; do
+                      --trigger-id --base-standards-file --base-standards-ref; do
             case "$supported" in (*" $flag "*) ;; (*) missing="$missing $flag" ;; esac
           done
           if [ -n "$missing" ]; then
@@ -1780,6 +1785,108 @@ jobs:
           echo "include_nits=$carries" >> "$GITHUB_OUTPUT"
           echo "include nits on $REPO#$PR: $carries"
 
+      - name: Read the base branch's accepted conditions
+        id: accepted
+        # The driver ENFORCES the Accepted list; it cannot fetch it. --guidelines-file
+        # names what the AGENT reads in its sandbox, which is guidance a model weighs.
+        # This is the copy this process hands the driver to decide whether a
+        # pre-existing blocker still withholds approval, so the fetch happens here.
+        #
+        # From the BASE ref, never the head. The head is this pull request's own merge,
+        # so a change that added an Accepted entry naming its own finding would clear
+        # the veto it caused. The driver records the ref beside every accepted finding
+        # for the same reason: a workflow that handed over the head's copy shows it on
+        # the pull request rather than hiding it.
+        #
+        # A repository with no standards file is the common case and not an error. Both
+        # outputs stay empty, the driver is passed neither flag, and nothing is
+        # accepted -- which is the same veto as before this step existed.
+        if: ${{ inputs.mode == 'review' && !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
+          GUIDELINES_FILE: ${{ inputs.guidelines-file }}
+        run: |
+          set -euo pipefail
+          # The driver's own DefaultGuidelinesFile, restated because this step fetches
+          # the file the driver enforces and the two have to name one file.
+          file="${GUIDELINES_FILE:-}"
+          if [ -z "$file" ]; then file="REVIEW.md"; fi
+          # This value reaches a URL, so anything but a plain repository path falls
+          # back. Character for character the driver's own isPlainRepoPath
+          # (internal/review/prompt.go): no leading slash, no parent reference, and
+          # nothing outside [A-Za-z0-9._/-]. The two have to agree -- a name this step
+          # accepts and the driver rejects reads one file and enforces another.
+          #
+          # One case statement, because the rule is one rule. Split across a case and
+          # a grep, one arm warned and the other fell back in silence, and the driver
+          # README tells an operator to check the logged path when standards seem not
+          # to apply.
+          case "$file" in
+            ""|/*|*..*|*[!A-Za-z0-9._/-]*)
+              echo "::warning::guidelines-file is not a plain repository path; reading REVIEW.md on $REPO instead"
+              file="REVIEW.md" ;;
+          esac
+
+          base="$(gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName)" || base=""
+          if [ -z "$base" ]; then
+            echo "::warning::could not read the base branch of $REPO#$PR; nothing is accepted, so every pre-existing blocker withholds"
+            exit 0
+          fi
+
+          # Cleared before the write. RUNNER_TEMP survives between jobs on a
+          # non-ephemeral self-hosted runner, which is the steady state here, and
+          # between attempts on a re-run -- so a copy left by an earlier run is a file
+          # this one could publish as the base branch's.
+          out="$RUNNER_TEMP/base-standards.md"
+          rm -f "$out"
+
+          # -f ref=, not ?ref=. A git ref may carry & # % or +, and one interpolated
+          # into the query string is read by GitHub as the end of the value: a wrong
+          # ref read, reported as the right one, which is the inverse of what
+          # --base-standards-ref exists to surface. gh puts -f on the query string for
+          # a GET and encodes it.
+          #
+          # stderr is captured rather than discarded, because an ABSENT file and an
+          # UNREADABLE one are the same outcome and not the same event. Both accept
+          # nothing, which is the safe direction and what the driver does. Only one of
+          # them is routine: a 403 or a rate limit silently re-imposes a veto the base
+          # branch had accepted, and a log line naming the file sends the operator
+          # after a file when the fault is the token.
+          #
+          # `2>&1 > "$out"`, and the order is the whole of it. stderr is duplicated to
+          # the substitution's pipe FIRST, then stdout is pointed at the file -- so the
+          # message reaches $err and the body reaches $out. Written the other way round
+          # both land in $out: the capture is empty, every failure reads as the generic
+          # one, and GitHub's error body is what this step would hand the driver as the
+          # base branch's standards.
+          if err="$(gh api "repos/$REPO/contents/$file" -f ref="$base" \
+                      -H "Accept: application/vnd.github.raw" 2>&1 > "$out")"; then
+            # A file that exists and is empty accepts nothing, and the drive step's own
+            # -s test would pass neither flag -- so taking the no-file branch here is
+            # what keeps the log from claiming a read that had no effect.
+            if [ -s "$out" ]; then
+              echo "path=$out" >> "$GITHUB_OUTPUT"
+              echo "ref=$base" >> "$GITHUB_OUTPUT"
+              echo "read $file from $base ($(wc -c < "$out") bytes)"
+            else
+              rm -f "$out"
+              echo "$REPO's $file is empty on $base; nothing is accepted"
+            fi
+          else
+            rm -f "$out"
+            case "$err" in
+              *"HTTP 404"*|*"Not Found"*)
+                echo "$REPO has no $file on $base; nothing is accepted" ;;
+              *)
+                echo "::warning::could not read $file from $base on $REPO: $err"
+                echo "::warning::nothing is accepted, so every pre-existing blocker withholds approval. This is a read failure and not an absent file -- check the token's contents: read scope and the API rate limit before adding the file" ;;
+            esac
+          fi
+
       - name: Drive session + collect verdict
         id: drive
         shell: bash
@@ -1813,6 +1920,10 @@ jobs:
           # are outside it, which is why the job cap has to sit above it rather than
           # at it.
           SEIDROID_RUN_DEADLINE_S: ${{ inputs.run-deadline-seconds }}
+          # The Accepted list this process enforces, and the ref it came from. Empty
+          # where the repository keeps no standards file, or where the read failed.
+          BASE_STANDARDS: ${{ steps.accepted.outputs.path }}
+          BASE_STANDARDS_REF: ${{ steps.accepted.outputs.ref }}
         run: |
           set -euo pipefail
           # OMNIGENT_MACHINE_CLIENT_ID/SECRET are already in the job env (see
@@ -1860,6 +1971,17 @@ jobs:
             # reader in prose and opens no thread on the line.
             if [ "${INCLUDE_NITS:-}" = "true" ]; then args+=(--include-nits); fi
             if [ -n "${TRIGGER_ID:-}" ]; then args+=(--trigger-id "$TRIGGER_ID"); fi
+            # The copy the DRIVER enforces. --guidelines-file above is the name the
+            # agent reads in its sandbox; this is the base branch's content, fetched
+            # out here because the driver cannot reach GitHub itself. The ref rides
+            # with it so a wrong one shows on the pull request instead of passing as
+            # the base.
+            if [ -s "${BASE_STANDARDS:-}" ]; then
+              args+=(--base-standards-file "$BASE_STANDARDS")
+              if [ -n "${BASE_STANDARDS_REF:-}" ]; then
+                args+=(--base-standards-ref "$BASE_STANDARDS_REF")
+              fi
+            fi
           fi
           set +e
           "$BIN" "${args[@]}"
@@ -2501,12 +2623,41 @@ jobs:
           # jq's error goes to the log and the value comes back on stdout, so a check
           # file this step cannot read states itself rather than arriving as data.
           #
-          # `// empty` rather than a bare field. A missing conclusion renders as the
-          # string "null", and every comparison below takes that for a conclusion.
+          # The RECORDED decision, not a position this step re-derives from the
+          # conclusion. The driver decides both in one reading: `approve` only where
+          # nothing withholds -- the reply affirmed it read the diff, nothing blocks,
+          # and no pre-existing blocker stands unaccepted.
+          #
+          # Re-deriving here is what shipped a comment ending "Approving", a footer
+          # reading decision `approve`, a neutral check and NO REVIEW AT ALL, on three
+          # pull requests, with nothing on any of them saying why. Two computations of
+          # one question will disagree; this step no longer holds the second.
+          #
+          # `// empty` rather than a bare field. A missing value renders as the string
+          # "null", which every comparison below would take for a decision.
+          decision="$(jq -r '.decision // empty' "$CHECK" || true)"
+          if [ -z "$decision" ]; then
+            # Warned, not exited. This step does two things and they fail apart: a
+            # missing decision costs the POSITION, and taking the withdrawal with it
+            # would strand a block an earlier run left on a finding this run did not
+            # reproduce -- which only a human can then clear.
+            echo "::warning::the check file names no decision, so no position is recorded on $REPO#$PR; the withdrawal below still runs, on the conclusion"
+          fi
+          # The conclusion is still read, for the WITHDRAWAL at the end of this step and
+          # for the log lines that name it. The two answer different questions and the
+          # split is the point: `decision` is the position this run records on the pull
+          # request, and `conclusion` plus the counts decide whether this run has the
+          # standing to clear a block an EARLIER one left. Nothing below re-derives an
+          # event from it.
           conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
           if [ -z "$conclusion" ]; then
-            echo "::warning::the check file names no conclusion; no position to take on $REPO#$PR"
-            exit 0
+            # The withdrawal is the one thing in this job that clears a merge gate, and
+            # it reads the conclusion to decide whether this run has the standing to.
+            # A sentinel that matched none of its branches would fall THROUGH it and
+            # dismiss the block anyway -- on a check file this step could not read.
+            # `unknown` is named in the guard below for that reason.
+            echo "::warning::the check file names no conclusion, so no block is withdrawn on $REPO#$PR; an earlier one stands until a run that reads one"
+            conclusion="unknown"
           fi
 
           # The commit the review read, recorded before it started and used as
@@ -2524,13 +2675,45 @@ jobs:
 
           event=""
           note=""
-          if [ "$conclusion" = "failure" ]; then
-            event=REQUEST_CHANGES
-            note="review found something blocking. The findings are on the lines they are about, and the summary is in this tool's comment on this pull request."
-          elif [ "$conclusion" = "success" ] && [ "$APPROVE_ON_SUCCESS" = "true" ]; then
-            event=APPROVE
-            note="review found nothing blocking."
-          fi
+          case "$decision" in
+            request_changes)
+              event=REQUEST_CHANGES
+              note="review found something blocking. The findings are on the lines they are about, and the summary is in this tool's comment on this pull request."
+              ;;
+            approve)
+              # approve-on-success stays the caller's policy, and it is the only thing
+              # this step still decides. Where it is off, the review states its
+              # position in the comment and records none here.
+              if [ "$APPROVE_ON_SUCCESS" = "true" ]; then
+                event=APPROVE
+                note="review found nothing blocking."
+              fi
+              ;;
+            comment)
+              # Only where something actually WITHHELD -- an unaccepted pre-existing
+              # blocker, a reply that never affirmed it read the diff, or a reply that
+              # wrote nothing down. Those are exactly the states the driver concludes
+              # something other than success for, and they are the states where its
+              # own notice names the finding that decided it.
+              #
+              # `comment` beside `success` is a different thing: the agent wrote the
+              # word, nothing withheld, and the driver publishes NO notice. Recording
+              # a review there would claim a finding that does not exist, beside a
+              # thumbs-up the reaction step leaves off the same success. So this takes
+              # no position, which is what it did before v0.20.0.
+              if [ "$conclusion" != "success" ]; then
+                event=COMMENT
+                note="review took no position. Its comment on this pull request names the finding that withheld approval."
+              fi
+              ;;
+            "")
+              # Already warned above, where the field was read. A second line here
+              # would report one missing field twice.
+              ;;
+            *)
+              echo "::warning::unrecognised decision \"$decision\" on $REPO#$PR; no position taken"
+              ;;
+          esac
 
           # commit_id is omitted rather than sent empty when the commit is unknown:
           # the API rejects an empty one, and its own default is the pull request's
@@ -2600,7 +2783,7 @@ jobs:
             post_position "$event" || rc=$?
             if [ "$rc" -eq 0 ]; then
               echo "recorded $event on $REPO#$PR"
-            elif [ "$rc" -eq 2 ] && post_position COMMENT; then
+            elif [ "$rc" -eq 2 ] && [ "$event" != "COMMENT" ] && post_position COMMENT; then
               echo "::warning::$REPO#$PR would not take $event, so this review is recorded as a comment; the check run carries the $conclusion conclusion"
             else
               echo "::warning::could not record $event on $REPO#$PR; the verdict comment stands"
@@ -2616,7 +2799,19 @@ jobs:
           # Withdrawn on the two things this run has to be able to say: it read the
           # change, and it found nothing blocking in it. A failure says the second is
           # false and stands behind its own block.
-          if [ "$conclusion" = "failure" ]; then
+          #
+          # The event is named as well, and it has to be. Deriving the event from the
+          # conclusion USED to make "posted REQUEST_CHANGES" and "concluded failure"
+          # one fact, so the failure test covered both. Reading the decision from the
+          # driver split them, and without this term a run can record a block and
+          # dismiss it in the same step -- its own, seconds old, on the strength of a
+          # conclusion that disagrees with the position it just took.
+          #
+          # `unknown` is the sentinel from the unreadable-conclusion branch above. It
+          # matches nothing else here, so naming it is what stops an unreadable check
+          # file from clearing a merge gate.
+          if [ "$event" = "REQUEST_CHANGES" ] || [ "$conclusion" = "failure" ] \
+             || [ "$conclusion" = "unknown" ]; then
             exit 0
           fi
           # success says both, because the driver gates it on the line count the review

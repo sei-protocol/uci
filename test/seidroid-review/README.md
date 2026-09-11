@@ -1,12 +1,13 @@
 # Workflow tests
 
-Four harnesses over `.github/workflows/seidroid-review.yml`. All four read the
+Five harnesses over `.github/workflows/seidroid-review.yml`. All five read the
 steps out of the YAML on every run, so none can pass against a stale copy.
 
 ```sh
 test/seidroid-review/run.sh        # placement and thread resolution
 test/seidroid-review/reactions.sh  # the three reaction steps
 test/seidroid-review/run-guard.sh  # the guard, and the reaction collection
+test/seidroid-review/decision.sh   # which review event the position step records
 python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
 python3 test/seidroid-review/deadline.py   .github/workflows/seidroid-review.yml
 ```
@@ -199,18 +200,68 @@ either wrong publishes nothing a reader can act on.
 A budget the reviews of the day are already reaching produces no verdict at all --
 not a failing check: no findings, and a pull request that reads as unreviewed rather
 than as broken. Two runs on `sei-protocol/platform` did exactly that against the
-driver's old 1200s default, while ordinary reviews landed at 943s and 1029s. So the
-budget is held to 1.5x the longest turn measured there, and that measurement is named
-in the file rather than folded into the threshold.
+driver's old 1200s default, while ordinary reviews landed at 943s and 1029s. The
+budget is therefore held to 1.5x the longest turn measured there, and that
+measurement is named in the file rather than folded into the threshold.
 
 A job cap at or under the budget is the same failure from the other side. A review
-costs more wall-clock than its own deadline -- the scout pass, two sandbox launches,
-the driver install and the publish steps all sit outside it -- so the runner kills the
-job before the driver can report why it timed out, and the annotation says only that
-the job was cancelled. The cap is held to 1.4x the budget.
+costs more wall-clock than its own deadline: the scout pass, two sandbox launches, the
+driver install and the publish steps all sit outside it. The runner then kills the job
+before the driver can report why it timed out, and the annotation says only that the
+job was cancelled. The cap is held to 1.4x the budget.
 
 The last check is the one `seidroid-review.yml`'s own comment asks for and nothing
 enforced: `MIN_DRIVER_VERSION` and the `driver-version` default are one version in two
 places. Raising the floor alone fails every caller that omits the input, at once and in
 the open. Raising the default alone leaves a floor admitting a driver this file no
 longer drives, and says nothing while it happens.
+
+## The review's position
+
+`decision.sh` runs `State the review's position on the pull request` against a `gh`
+stub of its own and asserts the review event it posted, one case per decision the
+driver can record.
+
+It exists because of what the step used to do. The event was derived here from
+`conclusion`, while the driver recorded its own `decision` from the findings — two
+computations of one question, and they disagreed. A run whose driver recorded
+`approve` beside a `neutral` check posted a comment ending "Approving", a footer
+reading decision `approve`, and **no review at all**. That shipped on three pull
+requests, and nothing on any of them said why.
+
+Since v0.20.0 the driver records the position and this step submits it. Every case
+here therefore asserts the EVENT, never the conclusion: a case written against the
+conclusion would pass against the code that had the bug. Run the harness against a copy of the
+workflow carrying the old derivation and four of the eight cases fail, including the
+two that were live — a withheld decision posting nothing, and a `success` conclusion
+manufacturing an APPROVE the driver did not record.
+
+`approve-on-success` is the one thing the step still decides, and it has its own
+case. Everything else comes from the driver, including the refusal to act on a
+decision the step does not recognise.
+
+### The withdrawal column
+
+Every case also asserts whether the step withdrew a standing block, and that half
+matters more than the event. The withdrawal is the only thing in this job that clears
+a merge gate, and deriving the event from the conclusion used to make
+"posted REQUEST_CHANGES" and "concluded failure" one fact — so the failure test
+covered both. Reading the decision from the driver split them, and three cases here
+exist because of what that split opened:
+
+- **`request_changes, odd success`** — the step must not record a block and dismiss
+  its own, seconds old, on a conclusion that disagrees with the position it just took.
+- **`no conclusion field`** — an unreadable conclusion is not a clean review. Falling
+  through the withdrawal on one clears a block on the strength of a file this step
+  could not read.
+- **`no decision field`** — the opposite direction, and the one that is easy to get
+  backwards. A missing decision costs the POSITION only. Taking the withdrawal with it
+  strands a block on a finding this run did not reproduce, which only a human clears.
+
+Every case runs against a standing block, so "did not withdraw" is a decision the step
+made rather than a list that happened to be empty.
+
+`bin-decision/gh` records the event posted, serves that standing block to the
+withdrawal's list, and accepts the dismissal. The list and the dismissal are stubbed
+so the step reaches its end under `set -e`: a step that died on an unstubbed call
+would pass a harness asserting what it never posted.

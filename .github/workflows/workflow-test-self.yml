@@ -3,7 +3,7 @@ name: Workflow tests
 # conditions evaluated against synthetic payloads. Nothing here reaches the GitHub
 # API, so this needs no token and no permissions.
 #
-# Three jobs, so each check in the list names the step it covers. A job that ran two
+# Five jobs, so each check in the list names the step it covers. A job that ran two
 # harnesses would report one name for two things, and one check would go red for the
 # other's failure.
 #
@@ -71,9 +71,41 @@ jobs:
       # lives and which the shell harness above cannot see.
       - name: Check the step conditions
         run: python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
-      # The two time limits, against each other and against a measured review. Neither
-      # a budget the reviews of the day already reach nor a job cap under it stops the
-      # workflow parsing, and both publish nothing a reader can act on.
+
+  review-position:
+    name: The review's position
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install the YAML reader
+        run: python3 -m pip install --quiet pyyaml
+      # Which review event the step records, per decision the driver wrote. Its own
+      # header says what it guards: the step used to derive the event from the
+      # conclusion instead, and a run whose driver recorded `approve` beside a neutral
+      # check posted a comment saying "Approving" and no review at all.
+      - name: Run the decision harness
+        run: test/seidroid-review/decision.sh
+
+  review-limits:
+    name: The review's time limits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install the YAML reader
+        run: python3 -m pip install --quiet pyyaml
+      # The driver's budget and the job cap, against each other and against a measured
+      # review. Neither a budget the reviews of the day already reach nor a cap under
+      # it stops the workflow parsing, and both publish nothing a reader can act on.
       - name: Check the review's time limits
         run: python3 test/seidroid-review/deadline.py .github/workflows/seidroid-review.yml
 
