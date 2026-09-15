@@ -3010,6 +3010,19 @@ jobs:
             echo "::notice::a $conclusion review that wrote nothing down does not clear an earlier block on $REPO#$PR"
             exit 0
           fi
+          # A dismissal asserts the current head is clean, which is the same class of
+          # claim as an approval -- so it takes the same guard. This review read commit
+          # A; if the pull request is on B now, the block it would clear guards code
+          # this run never saw, and clearing it hands a merge gate away on a diff
+          # nobody reviewed.
+          #
+          # Leaving the block standing is the recoverable direction. The next review
+          # clears it, where a block wrongly cleared needs a human to put back -- the
+          # same reason the approval downgrades rather than proceeding.
+          if [ "$moved" = true ]; then
+            echo "::warning::$REPO#$PR moved while this review ran, so it does not clear an earlier block; that block guards a commit this review did not read, and the next review clears it"
+            exit 0
+          fi
           # A driver that writes no counts leaves the three states indistinguishable, and
           # the withdrawal proceeds rather than stopping. Stopping strands the block
           # behind every re-review whose findings are all non-blocking, which that driver
@@ -3464,16 +3477,21 @@ jobs:
             # Every failure here is tolerated. The verdict is posted, and a stale notice
             # beside it is a smaller cost than failing a step that already did its work.
             # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
-            stale_notice="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+            # Every one, not the newest. Deleting one per run only holds the
+            # "exactly one notice" invariant while no deletion has ever failed, and
+            # that path is tolerated here -- so a single refusal leaves a notice that
+            # no later run reaches, standing beside a verdict that did land.
+            stale_notices="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
               --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.NO_VERDICT_MARKER)) | .id' \
-              2>/dev/null | tail -n 1 || true)"
-            if [ -n "$stale_notice" ]; then
+              2>/dev/null || true)"
+            while read -r stale_notice; do
+              [ -n "$stale_notice" ] || continue
               if gh api -X DELETE "repos/$REPO/issues/comments/$stale_notice" >/dev/null 2>&1; then
-                echo "withdrew the no-verdict notice an earlier run left on $REPO#$PR"
+                echo "withdrew the no-verdict notice $stale_notice an earlier run left on $REPO#$PR"
               else
                 echo "::warning::could not withdraw the no-verdict notice $stale_notice on $REPO#$PR; it now says this review did not complete, and it did"
               fi
-            fi
+            done <<< "$stale_notices"
             exit 0
           fi
 
@@ -3825,18 +3843,22 @@ jobs:
           # Every failure here is tolerated. Whichever caller runs this has something
           # else to say afterwards, and a stale notice is a smaller cost than losing it.
           delete_prior_notice() {
-            local id
+            local ids id
+            # Every one, not the newest, for the reason the verdict step's copy gives:
+            # the "exactly one" invariant above holds only while no deletion has failed,
+            # and every failure here is tolerated.
             # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
-            id="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+            ids="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
               --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.NO_VERDICT_MARKER)) | .id' \
-              2>/dev/null | tail -n 1 || true)"
-            if [ -n "$id" ]; then
+              2>/dev/null || true)"
+            while read -r id; do
+              [ -n "$id" ] || continue
               if gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1; then
-                echo "withdrew the standing no-verdict notice on $REPO#$PR"
+                echo "withdrew the standing no-verdict notice $id on $REPO#$PR"
               else
                 echo "::warning::could not withdraw the no-verdict notice $id on $REPO#$PR"
               fi
-            fi
+            done <<< "$ids"
           }
 
           # The check run's own summary, not a second account of the same run. That
