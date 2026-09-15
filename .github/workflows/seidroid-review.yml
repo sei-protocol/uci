@@ -532,6 +532,12 @@ env:
   # so a bare MARKER here would work today and become a trap for whichever step later
   # forgot to set its own.
   FINDING_MARKER: "<!-- seidroid-review:finding -->"
+  # What stamps the notice that a review reached NO verdict. Beside the other two for
+  # the reason they are beside each other: two steps write it -- the notice itself,
+  # and the verdict step that withdraws a stale one -- and a drift between them leaves
+  # a "this review did not complete" notice standing on a pull request whose review
+  # did complete, with nothing anywhere saying so.
+  NO_VERDICT_MARKER: "<!-- seidroid-review:no-verdict -->"
 
 jobs:
   guard:
@@ -630,7 +636,7 @@ jobs:
     # command. The fork check in `Admit the request` refuses code from outside the
     # organisation, on this path as well as the comment path.
     if: >-
-      ${{ (github.event_name == 'pull_request' && inputs.mode == 'review') ||
+      ${{ (github.event_name == 'pull_request' && inputs.mode != 'close') ||
       (((github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
       (github.event_name == 'pull_request_review_comment' && github.event.action == 'created') ||
       (github.event_name == 'pull_request_review' && github.event.action == 'submitted')) &&
@@ -683,8 +689,25 @@ jobs:
       - name: Refuse an event this workflow does not handle
         env:
           EVENT_NAME: ${{ github.event_name }}
+          MODE: ${{ inputs.mode }}
         run: |
           set -uo pipefail
+          # The mode axis, refused here for the same reason the event axis is: a caller
+          # error that nothing names costs a run that reports success having reviewed
+          # nothing. `mode` is a free-form string -- workflow_call has no enum -- so a
+          # typo reaches every `inputs.mode == 'review'` test below, matches none of
+          # them, and the whole workflow no-ops in silence.
+          #
+          # A pull_request close reaches neither this step nor this job: it skips the
+          # guard deliberately, and the review job reads that skip as its own trigger.
+          # So this sees `review` and the typos, and refuses only the typos.
+          case "$MODE" in
+            review|close) ;;
+            *)
+              echo "::error::seidroid review cannot be called with mode '$MODE'; it handles 'review' and 'close'" >&2
+              exit 1
+              ;;
+          esac
           case "$EVENT_NAME" in
             pull_request|issue_comment|pull_request_review_comment|pull_request_review) ;;
             pull_request_target)
@@ -1890,7 +1913,16 @@ jobs:
           # both land in $out: the capture is empty, every failure reads as the generic
           # one, and GitHub's error body is what this step would hand the driver as the
           # base branch's standards.
-          if err="$(gh api "repos/$REPO/contents/$file" -f ref="$base" \
+          # --method GET, and the read does not work without it. gh sends GET only
+          # while no parameter is supplied; `-f ref=` adds one and flips the request to
+          # POST, which puts the ref in a JSON body rather than the query string. There
+          # is no POST route for /contents, so every run took a 404 and reported it as
+          # "no standards file" -- the base branch's Accepted list never reached the
+          # driver, and every pre-existing blocker went on withholding approval on a
+          # repository that had accepted it. Same rule as the page size in the guard,
+          # and the same direction of failure: silent, and indistinguishable from the
+          # legitimate case.
+          if err="$(gh api --method GET "repos/$REPO/contents/$file" -f ref="$base" \
                       -H "Accept: application/vnd.github.raw" 2>&1 > "$out")"; then
             # A file that exists and is empty accepts nothing, and the drive step's own
             # -s test would pass neither flag -- so taking the no-file branch here is
@@ -2760,15 +2792,35 @@ jobs:
           case "$decision" in
             request_changes)
               event=REQUEST_CHANGES
-              note="review found something blocking. The findings are on the lines they are about, and the summary is in this tool's comment on this pull request."
+              note="review found something blocking. The findings are on the lines they are about, and the summary is in this tool's verdict on this pull request."
               ;;
             approve)
               # approve-on-success stays the caller's policy, and it is the only thing
               # this step still decides. Where it is off, the review states its
               # position in the comment and records none here.
+              #
+              # An approval also needs the commit. The fallback above -- let the API
+              # default to the pull request's current head -- is the weaker guarantee
+              # for a comment and for a block, and both stay true of code nobody read:
+              # a comment says something, a block withholds something. An approval
+              # ASSERTS something about a specific diff, so the same fallback would
+              # approve a commit pushed during the review, and under approve-on-success
+              # with an approval-count rule that approval is the gate. `Publish the
+              # review check run` refuses to exist without the commit for this reason;
+              # an approval is the same kind of claim.
+              #
+              # Downgraded rather than dropped: the review still records that it found
+              # nothing blocking, and the position it does not take is the one it
+              # cannot stand behind.
               if [ "$APPROVE_ON_SUCCESS" = "true" ]; then
-                event=APPROVE
-                note="review found nothing blocking."
+                if [ -n "$head_sha" ]; then
+                  event=APPROVE
+                  note="review found nothing blocking."
+                else
+                  event=COMMENT
+                  note="review found nothing blocking. It does not approve: the commit it read was not recorded, so an approval here would name whatever is at the head of this pull request now."
+                  echo "::warning::the reviewed commit was not recorded on $REPO#$PR, so this review comments where it would have approved; an approval would have named a commit the review may not have read"
+                fi
               fi
               ;;
             comment)
@@ -2785,7 +2837,7 @@ jobs:
               # no position, which is what it did before v0.20.0.
               if [ "$conclusion" != "success" ]; then
                 event=COMMENT
-                note="review took no position. Its comment on this pull request names the finding that withheld approval."
+                note="review took no position. Its verdict on this pull request names the finding that withheld approval."
               fi
               ;;
             "")
@@ -2949,8 +3001,22 @@ jobs:
           # it. A value carrying a quote or a backslash is data to jq here, where
           # substituting it into the program would make it syntax.
           # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+          # The identity test belongs here for the reason the resolve step gives for
+          # its own: a dismissal is a mutation, and it stays as narrow as the identity
+          # that performed the thing being undone. Without it the marker alone selects,
+          # and a human who opens their blocking review by quoting this tool's previous
+          # verdict has that review dismissed by the next run -- a larger mutation than
+          # closing a thread, done to somebody else's merge gate.
+          #
+          # Both logins, as the history read admits both: the position posts under the
+          # App identity where a caller configured one and under this workflow's own
+          # where it did not, so a block left by either is this tool's to withdraw.
+          # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
           if ! ids="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-                        --jq '[.[] | select(.state == "CHANGES_REQUESTED" and ((.body // "") | startswith($ENV.VERDICT_MARKER)))] | .[].id')"; then
+                        --jq '[.[] | select(.state == "CHANGES_REQUESTED"
+                                     and ((.body // "") | startswith($ENV.VERDICT_MARKER))
+                                     and ((.user.login // "")
+                                          | . == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))] | .[].id')"; then
             echo "::error::could not list the reviews to withdraw on $REPO#$PR; an earlier block may still stand and only a human can clear it"
             exit 1
           fi
@@ -3159,10 +3225,6 @@ jobs:
           # Read for the failure check below, which publishes under the same names the
           # publish step does. One switch drives both, so the set of names matches.
           AI_REVIEW_COPY: ${{ inputs.publish-ai-review-check }}
-          # The notice an earlier no-verdict run left, which this verdict supersedes.
-          # Its own name and its own value: a notice that reports no verdict has to be
-          # addressable apart from the verdict itself.
-          NO_VERDICT_MARKER: "<!-- seidroid-review:no-verdict -->"
           # GitHub rejects an issue comment over 65,536 characters. The driver bounds
           # the verdict it writes and clips its own text to fit (review.MaxBodyBytes,
           # 60,000). Nothing bounds $NOTE: it carries Finding.Detail, raw model prose
@@ -3715,11 +3777,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
-          # Its own marker, following the same shape the inline findings use. The
-          # verdict comment's marker means "this tool's verdict"; this comment reports
-          # that there is none, so a later step or a reader's query can address one
-          # without matching the other. This step reads it back to find its own notice.
-          MARKER: "<!-- seidroid-review:no-verdict -->"
           # Where the verdict comment would have gone.
           REPO: ${{ github.repository }}
           PR: ${{ needs.guard.outputs.pr_number }}
@@ -3743,7 +3800,7 @@ jobs:
             local id
             # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
             id="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
-              --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.MARKER)) | .id' \
+              --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.NO_VERDICT_MARKER)) | .id' \
               2>/dev/null | tail -n 1 || true)"
             if [ -n "$id" ]; then
               if gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1; then
@@ -3772,7 +3829,7 @@ jobs:
             started=false
           fi
           body="$(printf '%s\n%s\n\n%s\n\n%s\n' \
-            "$MARKER" \
+            "$NO_VERDICT_MARKER" \
             '**This review did not complete.** It reached no verdict, so there is no review of this change to act on.' \
             "$reason" \
             "Read this run for the rest: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
