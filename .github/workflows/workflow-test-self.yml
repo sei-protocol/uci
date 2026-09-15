@@ -91,6 +91,25 @@ jobs:
       - name: Run the decision harness
         run: test/seidroid-review/decision.sh
 
+  verdict-destination:
+    name: Where the verdict goes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install the YAML reader
+        run: python3 -m pip install --quiet pyyaml
+      # One verdict, in one place. The review carrying the inline comments holds it
+      # where that review landed, and a comment of its own holds it where none did.
+      # Both at once is the duplication this workflow was changed to remove; neither
+      # is a review the author cannot read.
+      - name: Run the verdict harness
+        run: test/seidroid-review/verdict.sh
+
   review-limits:
     name: The review's time limits
     runs-on: ubuntu-latest

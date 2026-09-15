@@ -71,6 +71,14 @@ case "$joined" in
     [ "${STUB_REVIEWS:-none}" = "FAIL" ] && refuse reviews
     case "${STUB_REVIEWS:-none}" in
       blocked) serve "[{\"id\":11,\"state\":\"CHANGES_REQUESTED\",\"body\":\"${VERDICT_MARKER}a block\"}]" ;;
+      # A verdict that rode in the review carrying the inline comments. COMMENTED,
+      # which is what the block check above must not select and the prior-review
+      # check below must.
+      verdict) serve "[{\"id\":33,\"user\":{\"type\":\"Bot\"},\"state\":\"COMMENTED\",\"body\":\"${VERDICT_MARKER}a verdict in the review\"}]" ;;
+      # The two shapes that carry the marker and are not a verdict: a person who
+      # quoted it, and a bot that mentioned it without opening on it.
+      quoted)  serve "[{\"id\":34,\"user\":{\"type\":\"User\"},\"state\":\"COMMENTED\",\"body\":\"${VERDICT_MARKER}quoted by a person\"}]" ;;
+      midbody) serve "[{\"id\":35,\"user\":{\"type\":\"Bot\"},\"state\":\"COMMENTED\",\"body\":\"as seen in ${VERDICT_MARKER} above\"}]" ;;
       *)       serve '[]' ;;
     esac
     ;;

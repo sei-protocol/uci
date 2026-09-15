@@ -11,6 +11,11 @@ STEP="Place findings on the code"
 SCRIPT="$HERE/place.sh"
 MARKER="$(python3 "$HERE/extract.py" "$WORKFLOW" "$STEP" "$SCRIPT")" || {
   echo "could not read '$STEP' out of $WORKFLOW"; exit 1; }
+# The step opens the review body with this one. Read out of the same file as the
+# step, so a rename of either marker fails here rather than passing against a
+# literal this harness kept its own copy of.
+VMARKER="$(python3 "$HERE/extract.py" "$WORKFLOW" "$STEP" "$SCRIPT" VERDICT_MARKER)" || {
+  echo "could not read VERDICT_MARKER out of $WORKFLOW"; exit 1; }
 pass=0 fail=0
 rows=()
 
@@ -58,6 +63,10 @@ run_case() {
   export STUB_LINE_OK="$HERE/fx/line-ok.tsv"
   export STUB_FILE_OK="$HERE/fx/file-ok.txt"
   export FINDINGS="$HERE/fx/all-placeable.json"
+  # What the driver rendered for this review. The step makes it the body of the
+  # review carrying the comments; a case that points this at an empty file is a run
+  # whose driver wrote no verdict.
+  export VERDICT="$HERE/fx/verdict.md"
   export REVIEWED_SHA=deadbeefcafedeadbeefcafedeadbeefcafedead
   for kv in "$@"; do export "${kv?}"; done
 
@@ -68,6 +77,7 @@ run_case() {
   export LINKAGE="$CASE/superseded-placed.txt"
   export REPO=owner/repo PR=7 GH_TOKEN=x
   export FINDING_MARKER="$MARKER"
+  export VERDICT_MARKER="$VMARKER"
   bash "$SCRIPT" > "$CASE/stdout.txt" 2> "$CASE/stderr.txt"
   echo "$?" > "$CASE/rc"
 }
@@ -83,6 +93,17 @@ rerun_case() { # KEY=VALUE overrides
 }
 
 out() { grep -E "^$1=" "$CASE/output.txt" | tail -1 | cut -d= -f2- ; }
+# The body of the review the step asked for, out of the request it sent. Empty when
+# it sent none.
+req_body() { jq -r '.body // ""' "$CASE/request.json" 2>/dev/null || true; }
+# Whether that body is this run's verdict under the marker, byte for byte. A test
+# that only looked for the marker would pass on a body carrying the marker and some
+# other text entirely.
+body_is_verdict() { # verdict-file
+  local want
+  want="$VMARKER"$'\n'"$(cat "$1")"
+  if [ "$(req_body)" = "$want" ]; then echo yes; else echo no; fi
+}
 calls() { grep -c "^CALL $1" "$CASE/calls.log" || true; }
 # The thread ids the step recorded, sorted and space-joined, so a case names the set
 # it expects on one line. Empty when no comment carrying a linkage posted.
@@ -115,7 +136,13 @@ check "body non-empty"       true "$(jq -r '(.body | length) > 0' "$CASE/request
 check "paths/lines/sides"    'pkg/a.go:11:RIGHT pkg/a.go:12:RIGHT pkg/b.go:2:RIGHT pkg/a.go:11:LEFT' \
                              "$(jq -r '[.comments[] | "\(.path):\(.line):\(.side)"] | join(" ")' "$CASE/request.json")"
 check "marker is first bytes"  4 "$(jq --arg m "$FINDING_MARKER" '[.comments[] | select((.body | .[0:($m|length)]) == $m)] | length' "$CASE/request.json")"
-check "review body unmarked"   false "$(jq -r --arg v "<!-- seidroid-review -->" '.body | startswith($v)' "$CASE/request.json")"
+# The body opens with the verdict marker now, because the body IS the verdict.
+# What keeps this review clear of the two selectors that look for that marker is
+# the event: the guard's block check and the withdrawal both require
+# CHANGES_REQUESTED as well. The pair is the contract, so both are asserted here
+# rather than one of them somewhere else.
+check "review body marked"     true "$(jq -r --arg v "$VMARKER" '.body | startswith($v)' "$CASE/request.json")"
+check "and it is COMMENTED"    COMMENT "$(jq -r .event "$CASE/request.json")"
 check "review body has no marker" false "$(jq -r --arg m "$FINDING_MARKER" '.body | startswith($m)' "$CASE/request.json")"
 check "multi-line detail intact" true \
   "$(jq -r '.comments[0].body | contains("A second paragraph with a\ttab.")' "$CASE/request.json")"
@@ -779,6 +806,62 @@ run_resolve noplan CHECK="$HERE/fx/check-noplan.json" RECORD="$tA"
 report_resolve "46 no thread plan"
 check "no calls at all"      0 "$(( $(calls threads) + $(calls resolve) ))"
 check "says so"              1 "$(grep -c 'this review closes no thread' "$CASE/stdout.txt")"
+
+# --- the verdict rides in the review, or it does not ride at all -------------
+# One review carries the summary and the findings it is about. What these cases
+# hold to is that the step never CLAIMS to have carried it when it did not: the
+# verdict step reads summary_posted to decide whether to post the verdict on its
+# own, and a false claim there is a review nobody can read.
+
+echo "== 47. the review carrying the findings carries the verdict =="
+run_case verdict-in-review FINDINGS="$HERE/fx/mixed.json"
+report "47 verdict in the review"
+check "one review call"         1 "$(calls reviews)"
+check "the body is the verdict" yes "$(body_is_verdict "$HERE/fx/verdict.md")"
+check "summary_posted"          true "$(out summary_posted)"
+check "review_id"               9001 "$(out review_id)"
+
+echo "== 48. a driver that wrote no verdict to carry =="
+# The review still posts, because the findings are what it is for. Its body then
+# names where the verdict will be, and summary_posted stays false so that the
+# verdict step puts one there.
+: > "$GEN/verdict-empty.md"
+run_case verdict-absent FINDINGS="$HERE/fx/mixed.json" VERDICT="$GEN/verdict-empty.md"
+report "48 no verdict to carry"
+check "still one review call"   1 "$(calls reviews)"
+check "the body is not the verdict" no "$(body_is_verdict "$HERE/fx/verdict.md")"
+check "it says where one will be" 1 "$(req_body | grep -c "in this tool.s comment on this pull request")"
+check "summary_posted"          false "$(out summary_posted)"
+check "review_id"               "" "$(out review_id)"
+check "says so"                 1 "$(grep -c 'left no verdict for the review' "$CASE/stdout.txt")"
+
+echo "== 49. a refused review carries nothing =="
+run_case verdict-refused FINDINGS="$HERE/fx/mixed.json" STUB_REVIEW=422
+report "49 review refused"
+check "summary_posted"          false "$(out summary_posted)"
+check "review_id"               "" "$(out review_id)"
+
+echo "== 50. a write that may have landed is not claimed =="
+# A 5xx may be a review that posted and then lost its connection. Claimed as
+# carried, the verdict step posts nothing and a run whose write did NOT land ends
+# with no verdict anywhere. Left unclaimed, the worst case is the verdict twice --
+# which a reader can see past, where an absent one they cannot.
+run_case verdict-uncertain FINDINGS="$HERE/fx/mixed.json" STUB_REVIEW=500
+report "50 review uncertain"
+check "summary_posted"          false "$(out summary_posted)"
+check "review_id"               "" "$(out review_id)"
+
+echo "== 51. no review at all, because the diff could not be indexed =="
+run_case verdict-unbatched FINDINGS="$HERE/fx/mixed.json" STUB_FILES=FAIL
+report "51 no review to carry it"
+check "no review call"          0 "$(calls reviews)"
+check "summary_posted"          false "$(out summary_posted)"
+
+echo "== 52. nothing to place, so nothing carries the verdict =="
+run_case verdict-nofindings FINDINGS="$HERE/fx/emptyarray.json"
+report "52 nothing to place"
+check "no review call"          0 "$(calls reviews)"
+check "summary_posted"          false "$(out summary_posted)"
 
 echo
 printf '%s\n' "${rows[@]}"

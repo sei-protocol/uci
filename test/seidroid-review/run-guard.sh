@@ -480,6 +480,31 @@ run_case auto-again "$ADMIT" EVENT_NAME=pull_request ACTION=synchronize BASE_REP
   STUB_COMMENTS=verdict
 check "a push after a verdict"                false "$(out admit)"
 check "and points at the comment"             1     "$(said 'comment @seidroid review to ask for one')"
+# The same push, after a verdict that rode in the review instead of in a comment
+# of its own. That run posts no comment at all, so a gate reading only the
+# comments finds nothing and reviews again on this push and on every one after it.
+run_case auto-again-review "$ADMIT" EVENT_NAME=pull_request ACTION=synchronize BASE_REPO_ID=1 HEAD_REPO_ID=1 \
+  STUB_REVIEWS=verdict
+check "a push after a verdict in a review"    false "$(out admit)"
+check "and points at the comment"             1     "$(said 'comment @seidroid review to ask for one')"
+check "and stops before the comments"         0     "$(calls comments)"
+# The two shapes that carry the marker and are not this workflow's verdict. Both
+# tests are the ones the comment read applies, and the review read must apply them
+# too or a person quoting the marker silences every later review.
+run_case auto-quoted "$ADMIT" EVENT_NAME=pull_request ACTION=synchronize BASE_REPO_ID=1 HEAD_REPO_ID=1 \
+  STUB_REVIEWS=quoted
+check "a person quoting the marker"           true  "$(out admit)"
+run_case auto-midbody "$ADMIT" EVENT_NAME=pull_request ACTION=synchronize BASE_REPO_ID=1 HEAD_REPO_ID=1 \
+  STUB_REVIEWS=midbody
+check "a bot that mentions it mid-body"       true  "$(out admit)"
+# A read this gate cannot make is not a verdict it can rule out, and it admits
+# rather than refusing a review whose author never learns it was refused. Not on
+# synchronize: there the block check reads the same list first and admits on its
+# own failure, so the path below is only reachable on an action it skips.
+run_case auto-reopened-unreadable "$ADMIT" EVENT_NAME=pull_request ACTION=reopened BASE_REPO_ID=1 HEAD_REPO_ID=1 \
+  STUB_REVIEWS=FAIL
+check "a read that fails admits"              true  "$(out admit)"
+check "and says why"                          1     "$(said 'could not read the reviews or the comments')"
 run_case auto-fork "$ADMIT" EVENT_NAME=pull_request ACTION=opened BASE_REPO_ID=1 HEAD_REPO_ID=2
 check "a fork pull request"                   false "$(out admit)"
 check "and spends no API call"                0     "$(calls origin)"

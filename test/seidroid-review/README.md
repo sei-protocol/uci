@@ -1,6 +1,6 @@
 # Workflow tests
 
-Five harnesses over `.github/workflows/seidroid-review.yml`. All five read the
+Six harnesses over `.github/workflows/seidroid-review.yml`. All six read the
 steps out of the YAML on every run, so none can pass against a stale copy.
 
 ```sh
@@ -8,6 +8,7 @@ test/seidroid-review/run.sh        # placement and thread resolution
 test/seidroid-review/reactions.sh  # the three reaction steps
 test/seidroid-review/run-guard.sh  # the guard, and the reaction collection
 test/seidroid-review/decision.sh   # which review event the position step records
+test/seidroid-review/verdict.sh    # where the verdict goes
 python3 test/seidroid-review/conditions.py .github/workflows/seidroid-review.yml
 python3 test/seidroid-review/deadline.py   .github/workflows/seidroid-review.yml
 ```
@@ -98,6 +99,25 @@ left survives. A thumb that answers a verdict already on the pull request surviv
 later cancellation. And a run cancelled before it reached `Answer the request` takes
 only the eyes: a thumb on the comment then belongs to an EARLIER run, whose verdict may
 still stand.
+
+## Where the verdict goes
+
+`verdict.sh` runs `Post the verdict` against `bin-verdict/gh`, which keeps the body
+of whichever write the step made. The step has two paths and exactly one of them
+may run: the review carrying the inline comments already holds the verdict, so this
+step appends the findings line and the observations that reached no line to that
+review; or no review holds it, and the verdict is posted as a comment of its own.
+
+So every case asserts the pair. Both writes at once is the duplication this workflow
+was changed to remove, and neither is a review the author cannot read. The cases
+that matter most are the ones where the append cannot happen -- a review whose id
+could not be read, and an append the API refused. The verdict is on the pull request
+in both, so neither may fall back to a comment, and what did not reach the review
+goes to the run's log instead.
+
+`bin-verdict/gh` lists the reads after the writes, so the step's own listing of the
+comments -- the one that withdraws a stale no-verdict notice -- is never recorded as
+the comment it posts.
 
 ## The step conditions
 

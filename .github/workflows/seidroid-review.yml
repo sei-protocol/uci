@@ -103,14 +103,14 @@ on:
 
           The module is nested, so the repository carries path-prefixed tags
           (sei-agent-driver/vX.Y.Z) while `go install` takes the bare version. Pass
-          `v0.20.0`; `sei-agent-driver/v0.20.0` is refused as a disallowed version
+          `v0.21.0`; `sei-agent-driver/v0.21.0` is refused as a disallowed version
           string. A commit sha resolves to a pseudo-version.
 
           Verify a pin from an EMPTY module cache: a warm one is a false green, because
           it resolves a pin the proxy may never have served.
         required: false
         type: string
-        default: 'v0.20.0'
+        default: 'v0.21.0'
       trigger-phrase:
         description: >-
           The mention a person types to ask for a review. The command is that phrase
@@ -1050,18 +1050,25 @@ jobs:
             fi
           fi
 
-          # One automatic review per pull request. The verdict comment is the
-          # record that one already ran: this workflow posts one for every review
-          # that reaches a verdict, it hangs on the pull request rather than on a
-          # commit, and a push does not remove it. The review check run is keyed
-          # on the head commit, so a push leaves none behind and every push would
-          # read as a first review.
+          # One automatic review per pull request. What records that one already ran
+          # is the verdict this workflow published, and it publishes that in one of
+          # two places: the review carrying the inline comments where that review
+          # landed, and a comment of its own where it did not. Either hangs on the
+          # pull request rather than on a commit, and a push does not remove it. The
+          # review check run is keyed on the head commit, so a push leaves none behind
+          # and every push would read as a first review.
+          #
+          # Reading only the comments was correct while the verdict was always one.
+          # It is not now: the run that places findings on the diff carries its verdict
+          # in that review and posts no comment at all, and a gate reading comments
+          # alone would find nothing and review again on the next push -- and on every
+          # push after it.
           #
           # The comment path never reaches this. A person who asks for a review by
           # name is answered, however many have already run.
           #
-          # Last of the checks, and the only one that pages the API. It makes at
-          # most two reads, and a block found on the first skips the second.
+          # Last of the checks, and the only one that pages the API. It makes at most
+          # three reads, and each one found skips the rest.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             re_review=false
             if [ "$ACTION" = "synchronize" ] && [ "$RE_REVIEW_ON_PUSH" = "true" ]; then
@@ -1124,14 +1131,27 @@ jobs:
               # and then meets a 5xx on page 3 exits non-zero holding it -- and the pull
               # request that pages is the one this gate is worth most on.
               read_ok=true
+              # The reviews first, because that is where a review that reached the diff
+              # leaves its verdict, and because it is the shorter list on the pull
+              # request this gate is worth most on. Both tests are the ones the comment
+              # read below applies, for the reasons given there.
               # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
               prior="$(GH_TOKEN="$GATE_TOKEN" \
-                gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+                gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
                 --jq '.[] | select(.user.type == "Bot" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
+              # The comments, for the run that placed nothing on the diff and so posted
+              # its verdict on its own. Skipped once the reviews answered: the question
+              # is whether a verdict exists, and one found is one found.
+              if [ -z "$prior" ]; then
+                # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
+                prior="$(GH_TOKEN="$GATE_TOKEN" \
+                  gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+                  --jq '.[] | select(.user.type == "Bot" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
+              fi
               if [ -n "$prior" ]; then
                 deny "$REPO#$PR already carries a verdict from this workflow, and this $ACTION event does not earn another; comment @seidroid review to ask for one"
               elif [ "$read_ok" = "false" ]; then
-                echo "::warning::could not read the comments on $REPO#$PR, so a review that already ran cannot be found; this one proceeds"
+                echo "::warning::could not read the reviews or the comments on $REPO#$PR, so a review that already ran cannot be found; this one proceeds"
               fi
             fi
           fi
@@ -1379,12 +1399,19 @@ jobs:
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
-          # v0.20.0 is load-bearing in a way the list above does not cover. The
-          # position step submits `.decision` from the check file, only v0.20.0 and
-          # later write it, and a file without it costs the review its position AND
-          # its withdrawal. An older driver reaching the review path would take both
-          # silently, which is why the floor is the gate rather than a default.
-          MIN_DRIVER_VERSION: 'v0.20.0'
+          # Two releases are load-bearing in a way the list above does not cover, and
+          # the floor is the later of them. The position step submits `.decision` from
+          # the check file, only v0.20.0 and later write it, and a file without it costs
+          # the review its position AND its withdrawal. v0.21.0 then renders the verdict
+          # from the structured block alone -- summary first, inline findings counted in
+          # their section rather than repeated, nits folded -- and that body is what the
+          # placement step below publishes as the review carrying the inline comments.
+          # An older driver publishes the model's prose there instead: a body written to
+          # stand beside the findings, posted as the thing that holds them.
+          #
+          # An older driver reaching the review path would take all of that silently,
+          # which is why the floor is the gate rather than a default.
+          MIN_DRIVER_VERSION: 'v0.21.0'
         run: |
           set -euo pipefail
           # An input default applies only when the caller omits the key. A caller that
@@ -2032,10 +2059,16 @@ jobs:
         # notification. Only the middle rung costs a call of its own: the reviews
         # API carries a line comment and has no field for a file-level one.
         #
-        # That review is COMMENTED and its body opens with no verdict marker, so the
-        # withdrawal below -- which selects a CHANGES_REQUESTED review whose body
-        # opens with VERDICT_MARKER -- does not select it, and the position this run
-        # takes stays the position step's alone.
+        # That review's body IS the verdict. One review carries the summary and the
+        # findings it is about, so the reader gets one notification and reads the
+        # verdict above the lines it cites, rather than a comment pointing at a review
+        # somewhere else on the page. The verdict step below then posts nothing, and
+        # falls back to a standalone comment only when this review does not land.
+        #
+        # It is COMMENTED, and that is what keeps it clear of the two selectors that
+        # look for this marker: both the guard's block check and the withdrawal below
+        # require CHANGES_REQUESTED as well, so neither can reach a review posted here.
+        # The position this run takes stays the position step's alone.
         #
         # Each comment's superseded thread ids are recorded as that comment posts, and
         # the resolve step closes a thread only on finding its id in that record. So a
@@ -2052,6 +2085,12 @@ jobs:
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           FINDINGS: ${{ steps.drive.outputs.findings_path }}
+          # The verdict the driver rendered, which becomes the body of the review
+          # carrying the comments below. From v0.21.0 that body is composed from the
+          # structured block alone: summary first, then the line-less findings by
+          # severity, with the ones placed below counted in their section rather than
+          # repeated here.
+          VERDICT: ${{ steps.drive.outputs.verdict_path }}
           # Findings that reached neither a line nor a file, collected for the
           # summary. Declared here so the step below can read it by output.
           NOTE: ${{ runner.temp }}/review-unplaced.md
@@ -2078,7 +2117,7 @@ jobs:
             # returns before reading a finding says false, so the answer to a question
             # this run never asked is the one that keeps a thread open.
             { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"
-              echo "superseded_linked=false"; } >> "$GITHUB_OUTPUT"
+              echo "superseded_linked=false"; echo "summary_posted=false"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # The commit the review read, recorded before it started and used as
@@ -2094,6 +2133,10 @@ jobs:
             echo "::warning::the reviewed commit was not recorded on $REPO#$PR; every finding goes to the summary instead of the diff"
           fi
           on_line=0 on_file=0 unplaced=0
+          # Whether the verdict reached the pull request in the review below, and the
+          # review that carries it. The verdict step reads both: the first decides
+          # whether it posts a comment at all, the second is what it appends to.
+          summary_posted=false review_id=""
 
           # The third rung, in two groups. A finding reaches the summary because the
           # diff has nowhere to attach it, or because the diff does carry its line and
@@ -2238,7 +2281,7 @@ jobs:
           if ! jq "$normalise" "$FINDINGS" > "$normal"; then
             echo "::warning::the findings file for $REPO#$PR could not be read, so this review places nothing on the diff"
             { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"
-              echo "superseded_linked=false"; } >> "$GITHUB_OUTPUT"
+              echo "superseded_linked=false"; echo "summary_posted=false"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # One finding naming a thread is the whole test. An older driver publishes the
@@ -2371,7 +2414,23 @@ jobs:
               # that, and a body that merely contains it matches neither.
               request="$RUNNER_TEMP/review-placement-request.json"
               response="$RUNNER_TEMP/review-placement-response.json"
-              review_body="Findings on the changed lines. The verdict and the summary are in this tool's comment on this pull request."
+              # The body is the verdict, under the marker that names this tool's own.
+              # A driver at the floor renders it summary-first and counts these
+              # comments in their section rather than repeating them, so the review
+              # reads as one piece: what the change needs, then the lines it needs it on.
+              #
+              # The fallback body is not a second verdict. If the driver wrote none to
+              # carry, this review still has to say something, and what it says is where
+              # the verdict is -- which is then the standalone comment the verdict step
+              # posts, because summary_posted stays false on this path.
+              carries_verdict=false
+              if [ -n "${VERDICT:-}" ] && [ -s "$VERDICT" ]; then
+                review_body="$VERDICT_MARKER"$'\n'"$(cat "$VERDICT")"
+                carries_verdict=true
+              else
+                review_body="Findings on the changed lines. The verdict and the summary are in this tool's comment on this pull request."
+                echo "::warning::the driver left no verdict for the review on $REPO#$PR to carry, so it names where one will be and the verdict is posted on its own"
+              fi
               # shellcheck disable=SC2016  # $sha and friends are jq's, bound by --arg
               jq --arg sha "$head_sha" --arg marker "$FINDING_MARKER" --arg body "$review_body" \
                  '{commit_id: $sha, event: "COMMENT", body: $body,
@@ -2407,6 +2466,27 @@ jobs:
                 # The call carries every anchored comment and creates all of them or
                 # none, so one write records the whole batch's linkage.
                 jq -r '.anchored[] | .supersedes[]' "$placement" >> "$LINKAGE"
+                # Both answers describe the review that carries the VERDICT, so neither
+                # is written for a review that carries only the findings. A run whose
+                # driver wrote no verdict leaves them as they started, and the verdict
+                # step posts the verdict on its own.
+                #
+                # The verdict is on the pull request the moment this call returns, so
+                # that step must not post a second copy of it. That holds even where the
+                # id could not be read: what an unreadable id costs is the append, and
+                # what would have been appended goes to the log instead.
+                if [ "$carries_verdict" = true ]; then
+                  summary_posted=true
+                  # -i puts the status line and the headers ahead of the body, so the
+                  # JSON begins after the first empty line. A value that is not a number
+                  # is no id, and reaching the API with one would edit nothing and report
+                  # that it had.
+                  review_id="$(sed '1,/^[[:space:]]*$/d' "$response" | jq -r '.id // empty' 2>/dev/null || true)"
+                  case "$review_id" in (''|*[!0-9]*) review_id="" ;; esac
+                  if [ -z "$review_id" ]; then
+                    echo "::warning::the review carrying the verdict posted on $REPO#$PR but its id could not be read, so what the verdict step would append to it goes to this run's log"
+                  fi
+                fi
                 echo "posted one review carrying $anchored comment(s) on $REPO#$PR"
               else
                 status="$(sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' "$response" || true)"
@@ -2456,8 +2536,10 @@ jobs:
           #
           # One append for all three, so the summary never reads a half-written set. It
           # requires all three for that reason, including the one no term renders.
-          { echo "on_line=$on_line"; echo "on_file=$on_file"; echo "unplaced=$unplaced"; } >> "$GITHUB_OUTPUT"
+          { echo "on_line=$on_line"; echo "on_file=$on_file"; echo "unplaced=$unplaced"
+            echo "summary_posted=$summary_posted"; echo "review_id=$review_id"; } >> "$GITHUB_OUTPUT"
           echo "findings: $on_line on a line, $on_file on a file, $unplaced in the summary"
+          echo "verdict carried by the review: $summary_posted"
 
       - name: Publish the review check run
         # The half of a review a reader sees without opening it. `review` is the check
@@ -3065,6 +3147,11 @@ jobs:
           ON_LINE: ${{ steps.place.outputs.on_line }}
           ON_FILE: ${{ steps.place.outputs.on_file }}
           UNPLACED: ${{ steps.place.outputs.unplaced }}
+          # Whether the review carrying the inline comments took the verdict, and which
+          # review that is. Together they decide what this step does: append to that
+          # review, or post the verdict on its own because no review holds it.
+          SUMMARY_POSTED: ${{ steps.place.outputs.summary_posted }}
+          REVIEW_ID: ${{ steps.place.outputs.review_id }}
           # The commit the review read, for the failure check below. Recorded before
           # the review started; absent only when that read failed, and then the
           # annotation is the only record.
@@ -3231,9 +3318,39 @@ jobs:
           #
           # repo/pr from env, not template-interpolated into the script. The failure is
           # caught rather than left to `set -e`, so this step can say what was lost.
+          # None of that applies to the append below. It edits a review this run created
+          # seconds ago, which is already the newest thing on the pull request and has
+          # already notified: the reader has not read it yet, so there is no earlier text
+          # to destroy and no position to lose. What the edit adds is what the placement
+          # step could not know when it posted -- how many findings reached the code, and
+          # which ones reached none of it.
+          #
+          # The comment is the fallback and not the default. A verdict in the review AND
+          # a verdict in a comment is the duplication PLT-1268 asked us to remove, so
+          # exactly one of these two paths runs.
           posted=false
-          if gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
+          if [ "${SUMMARY_POSTED:-}" = "true" ]; then
+            # The verdict is on the pull request, whatever the append does next.
             posted=true
+            if [ -n "${REVIEW_ID:-}" ]; then
+              if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID" \
+                   -f body="$body" >/dev/null 2>&1; then
+                echo "the review carrying the findings on $REPO#$PR now carries the whole verdict"
+              else
+                echo "::warning::could not append the findings line and the unplaced observations to review $REVIEW_ID on $REPO#$PR; the verdict that review carries still stands, and what did not reach it follows"
+                echo "--- what the review does not carry ---"
+                printf '%s\n' "$body"
+                echo "--- end ---"
+              fi
+            else
+              echo "::warning::the review carrying the verdict on $REPO#$PR could not be named, so the findings line and the unplaced observations did not reach it; what did not reach it follows"
+              echo "--- what the review does not carry ---"
+              printf '%s\n' "$body"
+              echo "--- end ---"
+            fi
+          elif gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; then
+            posted=true
+            echo "no review carried the verdict on $REPO#$PR, so it is posted as a comment of its own"
           fi
           # Whether the verdict is ON the pull request, for the withdrawal step at the
           # end of this job: a thumb on the trigger comment answers a verdict only when
@@ -3243,7 +3360,6 @@ jobs:
           # either way.
           echo "posted=$posted" >> "$GITHUB_OUTPUT"
           if [ "$posted" = true ]; then
-            echo "posted the verdict on $REPO#$PR"
             # An earlier run may have left a notice saying this review did not complete.
             # It did, so that notice now asserts a state that is not true and links a run
             # that is not the latest. The check run supersedes itself on the new commit;
