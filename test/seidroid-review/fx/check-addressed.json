@@ -1,0 +1,11 @@
+{
+  "conclusion": "success",
+  "title": "0 findings",
+  "summary": "The diff addressed one earlier finding.",
+  "threads": {
+    "addressed": ["PRRT_kwDOABCDEF4Ax1y2"],
+    "superseded": [],
+    "refused": ["PRRT_neverOurs"],
+    "refused_total": 1
+  }
+}

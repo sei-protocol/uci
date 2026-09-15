@@ -1,0 +1,11 @@
+{
+  "conclusion": "failure",
+  "title": "4 findings",
+  "summary": "Four findings restate threads under four identities.",
+  "threads": {
+    "addressed": [],
+    "superseded": ["PRRT_kwDOABCDEF4Dm5n6", "PRRT_kwDOABCDEF4Es7t8", "PRRT_kwDOABCDEF4Gw3x4", "PRRT_kwDOABCDEF4Hy5z6"],
+    "refused": [],
+    "refused_total": 0
+  }
+}

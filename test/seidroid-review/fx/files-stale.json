@@ -1,0 +1,1 @@
+{"files": [{"filename": "pkg/a.go", "patch": "@@ -40,3 +40,4 @@\n ctx40\n+added41\n+added42\n ctx43"}, {"filename": "pkg/b.go", "patch": "@@ -80,2 +80,3 @@\n eighty\n+eightyone\n eightytwo"}]}

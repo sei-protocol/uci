@@ -1,0 +1,1 @@
+[{"file": "pkg/a.go", "line": 999, "side": "RIGHT", "severity": "blocker", "detail": "A's replacement, off the hunks of a file the diff carries.", "supersedes": ["PRRT_kwDOABCDEF4Ax1y2"]}, {"file": "pkg/untouched.go", "line": 3, "side": "RIGHT", "severity": "suggestion", "detail": "B's replacement, on no file of this diff.", "supersedes": ["PRRT_kwDOABCDEF4Bz3w4"]}]

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# gh stub for verdict.sh: records where the verdict went, and keeps the body it
+# carried.
+#
+# The two writes are asserted apart because the whole point of the step is that
+# exactly one of them happens. A stub logging them as one call would pass a step
+# that did both.
+ARGV=("$@")
+joined="$*"
+
+# The body of whichever write this is, kept whole. The step assembles it from the
+# verdict, the findings line and the note, and a case reads it back to say which
+# of those reached the pull request.
+keep_body() {
+  local a
+  for a in "${ARGV[@]}"; do
+    case "$a" in body=*) printf '%s' "${a#body=}" > "$1" ;; esac
+  done
+}
+
+case "$joined" in
+  # The append: the verdict step adding to the review what placement could not
+  # know when it posted.
+  *"-X PUT"*"/pulls/"*"/reviews/"*)
+    keep_body "$STUB_PUT_BODY"
+    for a in "${ARGV[@]}"; do
+      case "$a" in */reviews/*) printf 'PUT %s\n' "${a##*/reviews/}" >> "$STUB_LOG" ;; esac
+    done
+    [ "${STUB_PUT:-ok}" = ok ] || { printf '{"message":"nope","status":"422"}\n'; exit 1; }
+    printf '{"id":9001}\n'; exit 0 ;;
+
+  # The fallback: the verdict as a comment of its own.
+  *"-X POST"*"/issues/"*"/comments"*)
+    keep_body "$STUB_POST_BODY"
+    printf 'POST comment\n' >> "$STUB_LOG"
+    [ "${STUB_POST:-ok}" = ok ] || { printf '{"message":"nope","status":"422"}\n'; exit 1; }
+    printf '{"id":55}\n'; exit 0 ;;
+
+  *"-X POST"*"/check-runs"*)
+    for a in "${ARGV[@]}"; do
+      case "$a" in name=*) printf 'CHECK %s\n' "${a#name=}" >> "$STUB_LOG" ;; esac
+    done
+    exit 0 ;;
+
+  *"-X DELETE"*) printf 'DELETE\n' >> "$STUB_LOG"; exit 0 ;;
+
+  # The stale no-verdict notice the step withdraws once its own verdict lands.
+  # Listed after the POST above, so a write is never read as the read.
+  *"/issues/"*"/comments"*) printf 'LIST comments\n' >> "$STUB_LOG"; exit 0 ;;
+
+  *) printf 'UNSTUBBED %s\n' "$joined" >> "$STUB_LOG"; exit 1 ;;
+esac

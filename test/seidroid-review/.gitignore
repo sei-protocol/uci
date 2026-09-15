@@ -1,0 +1,19 @@
+# Written by run.sh: the two steps extracted from the workflow, the fixtures it
+# generates, and one directory of output per case.
+place.sh
+resolve.sh
+fx/gen/
+out/
+# Written by reactions.sh: the three reaction steps, and one directory per case.
+ack.sh
+answer.sh
+withdraw.sh
+out-reactions/
+# Written by run-guard.sh: the five steps it extracts from the workflow. Two of
+# them are steps reactions.sh also extracts, under names of their own so neither
+# harness can overwrite the other's extraction.
+refuse.sh
+parse.sh
+admit.sh
+guard-ack.sh
+guard-answer.sh

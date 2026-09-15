@@ -1,0 +1,12 @@
+{
+  "conclusion": "failure",
+  "title": "3 findings",
+  "summary": "Three findings restate three open threads.",
+  "counts": {"blocking": 3, "non_blocking": 0, "placeable": 3, "pre_existing": 0},
+  "threads": {
+    "addressed": [],
+    "superseded": ["PRRT_kwDOABCDEF4Ax1y2", "PRRT_kwDOABCDEF4Bz3w4", "PRRT_kwDOABCDEF4Cq9r8"],
+    "refused": [],
+    "refused_total": 0
+  }
+}
