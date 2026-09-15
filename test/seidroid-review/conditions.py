@@ -449,6 +449,45 @@ def main():
                 )
     check("the rule found calls to check", True, calls > 0)
 
+    # === a published *_path is a file this run wrote ==========================
+    #
+    # RUNNER_TEMP survives between jobs on a non-ephemeral self-hosted runner, which is
+    # the steady state here, and these names carry no run id. A step that publishes the
+    # path before writing the file hands the next reader whatever the LAST run left --
+    # and every consumer tests the file with `-s`, so a populated leftover reads as a
+    # successful read of this run.
+    #
+    # `Read the threads this review left before` shipped that way: a failed fetch
+    # aborted the step with threads_path already published and the file untouched, so
+    # the driver was handed another pull request's findings as this one's history.
+    #
+    # The rule: a run block that publishes `<name>_path=$VAR` must also clear $VAR in
+    # the same block, with `rm -f` or a `:>` truncation.
+    print("\n== every published *_path is cleared in the step that publishes it")
+    paths = 0
+    for job in doc["jobs"].values():
+        for st in job.get("steps", []):
+            run = st.get("run")
+            if not run:
+                continue
+            for var in set(_re.findall(r'echo\s+"[A-Za-z0-9_]+_path=\$([A-Za-z_][A-Za-z0-9_]*)"', run)):
+                paths += 1
+                # Cleared by name, or by the directory it is assigned under. The
+                # drive step takes the second form and is the stronger of the two: its
+                # directory is run-scoped as well, so no earlier run can reach it.
+                cleared = _re.search(
+                    r'(?:rm\s+-f[^\n]*"\$%s"|:\s*>\s*"\$%s")' % (var, var), run
+                )
+                if not cleared:
+                    under = _re.search(r'%s="\$([A-Za-z_][A-Za-z0-9_]*)/' % var, run)
+                    if under:
+                        cleared = _re.search(
+                            r'rm\s+-rf[^\n]*"\$%s"' % under.group(1), run
+                        )
+                check(f"{label(st, 0)}: ${var} is cleared where its path is published",
+                      True, bool(cleared))
+    check("the rule found paths to check", True, paths > 0)
+
     print(f"\nassertions: {passed} passed, {failed} failed")
     return 1 if failed else 0
 

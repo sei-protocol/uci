@@ -54,7 +54,7 @@ run_case() {
   # against one, so "did not withdraw" is a decision the step made rather than a list
   # that happened to be empty.
   STUB_LOG="$log" STUB_STANDING=11 PATH="$HERE/bin-decision:$PATH" \
-  GH_TOKEN=stub REPO=o/r PR=7 REVIEWED_SHA="${SHA-deadbeef}" \
+  GH_TOKEN=stub REPO=o/r PR=7 REVIEWED_SHA="${SHA-deadbeef}" STUB_HEAD="${STUB_HEAD-}" \
   CHECK="$check" APPROVE_ON_SUCCESS="$approve" VERDICT_MARKER="$MARKER" \
     bash "$SCRIPT" > "$dir/out" 2>&1
 
@@ -116,9 +116,22 @@ echo "an approval names the commit it read, or it is not an approval"
 # The withdrawal column tracks the CONCLUSION, not the event, so it reads the same
 # here as it does for the cases above that carry a commit: this change moves the
 # approve arm alone and leaves the merge gate exactly where it was.
-SHA= run_case "approve, no recorded commit" approve success true COMMENT yes
-SHA= run_case "request_changes, no commit"  request_changes failure true REQUEST_CHANGES no
-SHA= run_case "comment, no commit"          comment neutral true COMMENT yes
+SHA='' run_case "approve, no recorded commit" approve success true COMMENT yes
+SHA='' run_case "request_changes, no commit"  request_changes failure true REQUEST_CHANGES no
+SHA='' run_case "comment, no commit"          comment neutral true COMMENT yes
+
+echo
+echo "an approval does not outlive the commit it read"
+# The driver resolves the head itself, so the recorded sha binds the publishers and
+# not the read: a push landing mid-review leaves every publisher naming commit A while
+# the model read commit B. A push does not cancel the run, so nothing corrects it.
+# Only the approval is gated on it, for the same reason the missing-sha branch is.
+STUB_HEAD=deadbeef run_case "approve, head unmoved"   approve success true APPROVE yes
+STUB_HEAD=cafebabe run_case "approve, head moved"     approve success true COMMENT yes
+STUB_HEAD=cafebabe run_case "block survives a push"   request_changes failure true REQUEST_CHANGES no
+# The read itself failing is not an answer, and withholding the vote on an unanswered
+# question would cost the common case to guard the rare one.
+run_case "approve, head unreadable"                   approve success true APPROVE yes
 
 echo "assertions: $passed passed, $failed failed"
 rm -f "$SCRIPT"

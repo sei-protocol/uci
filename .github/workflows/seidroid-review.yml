@@ -1645,6 +1645,18 @@ jobs:
         run: |
           set -euo pipefail
           echo "threads_path=$THREADS" >> "$GITHUB_OUTPUT"
+          # Emptied before anything is written, and the output above is already set.
+          # RUNNER_TEMP survives between jobs on a non-ephemeral self-hosted runner,
+          # which is the steady state here, and this name carries no run id. Without
+          # this, a fetch that fails aborts the step with the OUTPUT published and the
+          # file untouched -- so the drive step's `[ -s "$THREADS" ]` passes on a file
+          # ANOTHER pull request's review left, and the driver is handed that pull
+          # request's findings as this one's own history. Silent both ways: the failure
+          # is tolerated, and a populated file reads as a successful recall.
+          #
+          # The same guard the base-standards read, the drive step and placement each
+          # state for the same premise. This was the one read path without it.
+          rm -f "$THREADS" "$THREADS.raw"
           owner="${REPO%%/*}"; name="${REPO##*/}"
 
           # Every page, not the first hundred. A pull request reviewed enough times
@@ -2629,7 +2641,39 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -s "$CHECK" ]; then
-            echo "no check run to publish"
+            # Nothing to publish is not the same as nothing to say. Check runs are keyed
+            # on the commit and GitHub surfaces the latest per name, so on a commit an
+            # earlier review already passed, a re-review that dies before the driver --
+            # a failed install, the MIN_DRIVER_VERSION refusal -- leaves that success
+            # standing as the current `review`. A branch rule requiring it then reads
+            # green for a review that did not happen, while the no-verdict notice on the
+            # pull request says otherwise. The gate and the notice must not disagree.
+            #
+            # Same treatment `Post the verdict`'s own failure path gives the same
+            # hazard, under the same names, so neither leaves a stale conclusion.
+            #
+            # With no commit there is no gate to correct, and none to be wrong either.
+            if [ -z "${REVIEWED_SHA:-}" ]; then
+              echo "no check run to publish, and no commit to publish one against"
+              exit 0
+            fi
+            echo "no check file; publishing failure so an earlier run's conclusion on $REVIEWED_SHA does not stand for this one"
+            incomplete() {
+              gh api -X POST "repos/$REPO/check-runs" \
+                -f name="$1" \
+                -f head_sha="$REVIEWED_SHA" \
+                -f status=completed \
+                -f conclusion=failure \
+                -f output[title]="review did not complete" \
+                -f output[summary]="This review ended before the driver wrote a result, so it reached no conclusion about this commit. Read the workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                >/dev/null
+            }
+            incomplete review \
+              || echo "::warning::the incomplete-review check run could not be posted on $REPO#$PR; an earlier run's conclusion may still stand on $REVIEWED_SHA"
+            if [ "${AI_REVIEW_COPY:-}" = "true" ]; then
+              incomplete "AI Review" \
+                || echo "::warning::the AI Review copy of the incomplete-review check run could not be posted on $REPO#$PR"
+            fi
             exit 0
           fi
           # A run that produced no verdict publishes failure, whatever the file says.
@@ -2804,6 +2848,29 @@ jobs:
             echo "::warning::the reviewed commit was not recorded; the position goes on the current head of $REPO#$PR, which the review may not have read"
           fi
 
+          # Whether the pull request moved while the review ran. The driver resolves
+          # the head itself and takes no commit from this file, so the recorded sha
+          # binds the PUBLISHERS and not the read: a push landing mid-review means
+          # every publisher names commit A while the model read commit B. A push does
+          # not cancel this run, so nothing corrects it afterwards.
+          #
+          # Only the approval is gated on it, for the reason the empty-sha branch below
+          # gives: a comment and a block stay true of code nobody read, and an approval
+          # does not. This is the stale-sha half of the same asymmetry.
+          #
+          # A read that fails leaves this false and the vote stands. The window is
+          # seconds, and refusing an approval on an unanswered question would cost the
+          # common case to guard the rare one.
+          moved=false
+          if [ -n "$head_sha" ]; then
+            now="$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null || true)"
+            case "$now" in (''|*[!0-9a-f]*) now="" ;; esac
+            if [ -n "$now" ] && [ "$now" != "$head_sha" ]; then
+              moved=true
+              echo "::warning::$REPO#$PR moved from $head_sha to $now while this review ran; what it publishes names the commit it read, and its approval is downgraded to a comment"
+            fi
+          fi
+
           event=""
           note=""
           case "$decision" in
@@ -2830,13 +2897,16 @@ jobs:
               # nothing blocking, and the position it does not take is the one it
               # cannot stand behind.
               if [ "$APPROVE_ON_SUCCESS" = "true" ]; then
-                if [ -n "$head_sha" ]; then
+                if [ -n "$head_sha" ] && [ "$moved" = false ]; then
                   event=APPROVE
                   note="review found nothing blocking."
-                else
+                elif [ -z "$head_sha" ]; then
                   event=COMMENT
                   note="review found nothing blocking. It does not approve: the commit it read was not recorded, so an approval here would name whatever is at the head of this pull request now."
                   echo "::warning::the reviewed commit was not recorded on $REPO#$PR, so this review comments where it would have approved; an approval would have named a commit the review may not have read"
+                else
+                  event=COMMENT
+                  note="review found nothing blocking in the commit it read. It does not approve: this pull request was pushed to while the review ran, so the approval would stand against code the review never saw. Ask for another review to have the new commit read."
                 fi
               fi
               ;;

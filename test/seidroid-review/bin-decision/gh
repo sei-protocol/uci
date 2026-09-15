@@ -26,5 +26,13 @@ case "$joined" in
     printf 'LIST\n' >> "$STUB_LOG"
     [ -n "${STUB_STANDING:-}" ] && printf '%s\n' "$STUB_STANDING"
     exit 0 ;;
+  *"/pulls/"*)
+    # The pull request's CURRENT head, which the position step compares with the commit
+    # the review recorded. Listed after the reviews cases above, so /pulls/N/reviews is
+    # never answered here. STUB_HEAD unset is the read failing, which must leave the
+    # vote standing rather than withhold it on an unanswered question.
+    printf 'HEAD\n' >> "$STUB_LOG"
+    [ -n "${STUB_HEAD:-}" ] || exit 1
+    printf '%s\n' "$STUB_HEAD"; exit 0 ;;
   *) printf 'UNSTUBBED %s\n' "$joined" >> "$STUB_LOG"; exit 1 ;;
 esac
