@@ -59,6 +59,9 @@ run_case() {
   export STUB_PUT_BODY="$CASE/put-body.txt"; : > "$STUB_PUT_BODY"
   export STUB_POST_BODY="$CASE/post-body.txt"; : > "$STUB_POST_BODY"
   export STUB_PUT=ok STUB_POST=ok
+  # The stale no-verdict notices this pull request carries. Cleared per case, so one
+  # case's leftovers are not the next case's pull request.
+  export STUB_NOTICES=
 
   printf '%s\n' "the verdict the driver rendered" > "$CASE/verdict.md"
   printf '{"conclusion":"failure","counts":{"blocking":2,"non_blocking":1,"pre_existing":0}}\n' \
@@ -139,5 +142,18 @@ check "the check run fails"       1 "$(calls 'CHECK review')"
 check "and the verdict is in the log" 1 "$(said 'verdict, unposted')"
 
 echo
+echo
+echo "every stale no-verdict notice is withdrawn, not the newest"
+# The "exactly one notice" invariant holds only while no deletion has ever failed,
+# and that path is tolerated -- so duplicates accumulate, and taking the newest per
+# run leaves the older ones standing on a pull request whose review did complete.
+run_case carried-notices STUB_NOTICES="101 102 103"
+check "one read"                    1 "$(calls 'LIST comments')"
+check "all three withdrawn"         3 "$(calls 'DELETE')"
+check "the oldest among them"       1 "$(grep -c '^DELETE 101$' "$STUB_LOG")"
+check "and the newest"              1 "$(grep -c '^DELETE 103$' "$STUB_LOG")"
+run_case carried-no-notices
+check "none to withdraw"            0 "$(calls 'DELETE')"
+
 echo "assertions: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

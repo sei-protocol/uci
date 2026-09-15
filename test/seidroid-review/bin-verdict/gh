@@ -42,11 +42,21 @@ case "$joined" in
     done
     exit 0 ;;
 
-  *"-X DELETE"*) printf 'DELETE\n' >> "$STUB_LOG"; exit 0 ;;
+  *"-X DELETE"*)
+    for a in "${ARGV[@]}"; do
+      case "$a" in */comments/*) printf 'DELETE %s\n' "${a##*/comments/}" >> "$STUB_LOG" ;; esac
+    done
+    exit 0 ;;
 
   # The stale no-verdict notice the step withdraws once its own verdict lands.
   # Listed after the POST above, so a write is never read as the read.
-  *"/issues/"*"/comments"*) printf 'LIST comments\n' >> "$STUB_LOG"; exit 0 ;;
+  *"/issues/"*"/comments"*)
+    printf 'LIST comments\n' >> "$STUB_LOG"
+    # The stale no-verdict notices the pull request carries, one id per line, which is
+    # what --paginate emits. More than one is the state a failed deletion leaves, and
+    # it is the state the step has to clear all of.
+    for n in ${STUB_NOTICES:-}; do printf '%s\n' "$n"; done
+    exit 0 ;;
 
   *) printf 'UNSTUBBED %s\n' "$joined" >> "$STUB_LOG"; exit 1 ;;
 esac

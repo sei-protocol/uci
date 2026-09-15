@@ -1,76 +1,17 @@
 name: seidroid review
 run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event.pull_request.number) && format('#{0}', github.event.issue.number || github.event.pull_request.number) || github.ref_name }}
-# Reusable, comment-triggered agentic PR review, driven by the sei-agent-driver
-# binary from sei-protocol/sei-internal-skills. That module is where the reviewer's
-# logic and its prompt live; this file is the GitHub wiring around it, and the two
-# are versioned separately -- `uses:` pins this file, and this file pins the binary
-# through the `driver-version` default. A thin caller in the reviewed repo wires the
-# triggers and calls this with `uses:`. Flow: comment `@seidroid review` on a pull
-# request -> guard gate -> install and run the driver over one managed omnigent
-# session -> post the verdict as a new comment, the findings it can place, and its
-# check runs.
+# Reusable, comment-triggered agentic pull request review. The reviewer's logic and
+# its prompt live in the sei-agent-driver binary from sei-protocol/sei-internal-skills;
+# this file is the GitHub wiring around it, pinned through the `driver-version`
+# default. A thin caller in the reviewed repository wires the triggers and calls this
+# with `uses:`.
 #
-# TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
-# wires that trigger and passes `mode: review`. A MANUAL one runs when a person writes
-# `@seidroid review` on the pull request: on the conversation, in a diff thread, or in
-# a review body. Both spend model quota and hold a sandbox, so both are gated -- see
-# the guard below. Both paths refuse a fork-originated pull request. The automatic path
-# reviews a pull request once. It reviews a later push only where the caller sets
-# `re-review-on-push`, or where a block of its own stands. It also refuses a draft and
-# honours the skip-review label. The manual path additionally checks who is asking.
+# It REPLACES ai-review.yml rather than running beside it: a repository that wires the
+# automatic path here should retire that caller in the same change, or every pull
+# request is reviewed twice.
 #
-# FOUR EVENTS reach this file, and the guard refuses any other by name: `pull_request`
-# for the automatic path, and `issue_comment`, `pull_request_review_comment` and
-# `pull_request_review` for the manual one. A caller wires the ones it wants.
-#
-# This file is the automation of record. It REPLACES `ai-review.yml` rather than
-# running beside it; a repository that wires the automatic path here should retire
-# that caller in the same change, or every pull request is reviewed twice.
-#
-# The driver is installed with `go install` at `driver-version`, which defaults to the
-# release this file drives, so every caller that omits the input runs one driver and one
-# conclusion vocabulary. The install step checks the binary it got against that contract
-# and fails there, before the review spends quota or takes a sandbox. The session is
-# keyed on the pull request and OUTLIVES the run, which is why `mode: close` exists:
-# it is the only thing that reclaims a sandbox.
-#
-# What changed versus the Python driver's workflow, and why:
-#   - No runtime dependency install of the reviewer itself. The binary comes from
-#     `go install` against the module's committed go.sum, so no package-manager
-#     step runs unpinned code on a runner that is about to hold a live credential.
-#   - No curl mint step, and no bearer token ever appears in a step output.
-#     The driver mints its own session bearer in-process from
-#     OMNIGENT_MACHINE_CLIENT_ID + OMNIGENT_MACHINE_CLIENT_SECRET
-#     (client_credentials). The secret is wired as JOB-level env on the
-#     `review` job below, never as step-level env on a `uses:` step --
-#     step-level env on a `uses:` step does not reach a composite action, and
-#     that exact defect broke every real run of the original Python workflow.
-#   - Every GitHub-supplied value (repo, PR number, comment id) is routed
-#     through env vars and read as "$VAR" in shell -- never interpolated as
-#     ${{ }} directly into a shell or jq command line, so a hostile PR title,
-#     branch name or comment body cannot inject shell/jq syntax.
-#   - The verdict file's ABSENCE means "no verdict to post", and no step writes a
-#     placeholder into it. A review that reaches none still publishes, because a
-#     pull request with no artifact on it reads as a review that never ran: the
-#     driver writes a failing check run to the same path it writes the deciding
-#     one, under the title `no verdict`, and a step of its own reports the run in
-#     a comment. Exactly one comment
-#     per review run either way. Neither takes a position on the pull request, and
-#     neither clears an earlier one -- a review that produced nothing has no
-#     position to state.
-#   - The outcome is surfaced even when the driver exits non-zero. The
-#     surfacing steps gate on whether a verdict was produced rather than on
-#     the exit code, so a review that reached one still posts it whatever else
-#     went wrong; `!cancelled()` rather than `success()` keeps that true while
-#     still skipping a run superseded by a newer trigger. Every surfacing step
-#     skips such a run. One step does not, and it is the last in the job: it
-#     withdraws the reactions a cancelled run left on the trigger comment, and
-#     it reads no verdict, so it can state no outcome.
-#   - allow-tools is a workflow input, defaulting to Bash,Read because the
-#     prompt's first step is a shell command and a declined prompt therefore
-#     produces a turn that reports it could not read the diff. Its access
-#     control is the trigger gate above, not the allowlist -- see
-#     https://github.com/sei-protocol/sei-internal-skills/blob/main/sei-agent-driver/cmd/sei-agent-driver/README.md
+# The driver's session outlives the run, which is why `mode: close` exists -- it is the
+# only thing that reclaims a sandbox.
 on:
   workflow_call:
     inputs:
@@ -3069,6 +3010,19 @@ jobs:
             echo "::notice::a $conclusion review that wrote nothing down does not clear an earlier block on $REPO#$PR"
             exit 0
           fi
+          # A dismissal asserts the current head is clean, which is the same class of
+          # claim as an approval -- so it takes the same guard. This review read commit
+          # A; if the pull request is on B now, the block it would clear guards code
+          # this run never saw, and clearing it hands a merge gate away on a diff
+          # nobody reviewed.
+          #
+          # Leaving the block standing is the recoverable direction. The next review
+          # clears it, where a block wrongly cleared needs a human to put back -- the
+          # same reason the approval downgrades rather than proceeding.
+          if [ "$moved" = true ]; then
+            echo "::warning::$REPO#$PR moved while this review ran, so it does not clear an earlier block; that block guards a commit this review did not read, and the next review clears it"
+            exit 0
+          fi
           # A driver that writes no counts leaves the three states indistinguishable, and
           # the withdrawal proceeds rather than stopping. Stopping strands the block
           # behind every re-review whose findings are all non-blocking, which that driver
@@ -3523,16 +3477,21 @@ jobs:
             # Every failure here is tolerated. The verdict is posted, and a stale notice
             # beside it is a smaller cost than failing a step that already did its work.
             # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
-            stale_notice="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+            # Every one, not the newest. Deleting one per run only holds the
+            # "exactly one notice" invariant while no deletion has ever failed, and
+            # that path is tolerated here -- so a single refusal leaves a notice that
+            # no later run reaches, standing beside a verdict that did land.
+            stale_notices="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
               --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.NO_VERDICT_MARKER)) | .id' \
-              2>/dev/null | tail -n 1 || true)"
-            if [ -n "$stale_notice" ]; then
+              2>/dev/null || true)"
+            while read -r stale_notice; do
+              [ -n "$stale_notice" ] || continue
               if gh api -X DELETE "repos/$REPO/issues/comments/$stale_notice" >/dev/null 2>&1; then
-                echo "withdrew the no-verdict notice an earlier run left on $REPO#$PR"
+                echo "withdrew the no-verdict notice $stale_notice an earlier run left on $REPO#$PR"
               else
                 echo "::warning::could not withdraw the no-verdict notice $stale_notice on $REPO#$PR; it now says this review did not complete, and it did"
               fi
-            fi
+            done <<< "$stale_notices"
             exit 0
           fi
 
@@ -3884,18 +3843,22 @@ jobs:
           # Every failure here is tolerated. Whichever caller runs this has something
           # else to say afterwards, and a stale notice is a smaller cost than losing it.
           delete_prior_notice() {
-            local id
+            local ids id
+            # Every one, not the newest, for the reason the verdict step's copy gives:
+            # the "exactly one" invariant above holds only while no deletion has failed,
+            # and every failure here is tolerated.
             # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
-            id="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+            ids="$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
               --jq '.[] | select(.user.type == "Bot") | select(.body | startswith($ENV.NO_VERDICT_MARKER)) | .id' \
-              2>/dev/null | tail -n 1 || true)"
-            if [ -n "$id" ]; then
+              2>/dev/null || true)"
+            while read -r id; do
+              [ -n "$id" ] || continue
               if gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1; then
-                echo "withdrew the standing no-verdict notice on $REPO#$PR"
+                echo "withdrew the standing no-verdict notice $id on $REPO#$PR"
               else
                 echo "::warning::could not withdraw the no-verdict notice $id on $REPO#$PR"
               fi
-            fi
+            done <<< "$ids"
           }
 
           # The check run's own summary, not a second account of the same run. That

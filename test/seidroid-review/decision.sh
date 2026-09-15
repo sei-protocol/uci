@@ -126,8 +126,15 @@ echo "an approval does not outlive the commit it read"
 # not the read: a push landing mid-review leaves every publisher naming commit A while
 # the model read commit B. A push does not cancel the run, so nothing corrects it.
 # Only the approval is gated on it, for the same reason the missing-sha branch is.
+#
+# The withdrawal takes the same guard, and the pair below is what isolates it: the
+# same clean review withdraws on an unmoved head and does not on a moved one. A
+# dismissal asserts the current head is clean, so clearing a block after the head
+# moved hands a merge gate away on a diff nobody reviewed. The block standing is
+# recoverable -- the next review clears it -- where a block wrongly cleared needs a
+# human to put back.
 STUB_HEAD=deadbeef run_case "approve, head unmoved"   approve success true APPROVE yes
-STUB_HEAD=cafebabe run_case "approve, head moved"     approve success true COMMENT yes
+STUB_HEAD=cafebabe run_case "approve, head moved"     approve success true COMMENT no
 STUB_HEAD=cafebabe run_case "block survives a push"   request_changes failure true REQUEST_CHANGES no
 # The read itself failing is not an answer, and withholding the vote on an unanswered
 # question would cost the common case to guard the rare one.
