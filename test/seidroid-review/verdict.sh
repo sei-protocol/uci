@@ -40,6 +40,14 @@ PY
 # so reading it from the step would let the harness pass while those two drift.
 NO_VERDICT_MARKER="$(python3 "$HERE/extract.py" "$WORKFLOW" "$STEP" "$SCRIPT" NO_VERDICT_MARKER)" || {
   echo "could not read NO_VERDICT_MARKER out of $WORKFLOW"; exit 1; }
+
+# The sibling step, which leaves the notice this one withdraws. It carries its own
+# copy of the cleanup, and a near-duplicate is exactly the code that drifts -- so it
+# is driven here rather than trusted to match.
+NOTICE_STEP="Report a review that reached no verdict"
+NOTICE_SCRIPT="$(mktemp)"
+python3 "$HERE/extract.py" "$WORKFLOW" "$NOTICE_STEP" "$NOTICE_SCRIPT" NO_VERDICT_MARKER >/dev/null || {
+  echo "could not extract '$NOTICE_STEP'"; exit 1; }
 MAX_BODY_BYTES="$(step_env MAX_BODY_BYTES)" || exit 1
 NOTICE_BYTES="$(step_env NOTICE_BYTES)" || exit 1
 
@@ -58,7 +66,7 @@ run_case() {
   export STUB_LOG="$CASE/log"; : > "$STUB_LOG"
   export STUB_PUT_BODY="$CASE/put-body.txt"; : > "$STUB_PUT_BODY"
   export STUB_POST_BODY="$CASE/post-body.txt"; : > "$STUB_POST_BODY"
-  export STUB_PUT=ok STUB_POST=ok
+  export STUB_PUT=ok STUB_POST=ok STUB_DELETE=ok
   # The stale no-verdict notices this pull request carries. Cleared per case, so one
   # case's leftovers are not the next case's pull request.
   export STUB_NOTICES=
@@ -154,6 +162,53 @@ check "the oldest among them"       1 "$(grep -c '^DELETE 101$' "$STUB_LOG")"
 check "and the newest"              1 "$(grep -c '^DELETE 103$' "$STUB_LOG")"
 run_case carried-no-notices
 check "none to withdraw"            0 "$(calls 'DELETE')"
+
+# run_notice <name> [KEY=VALUE ...] -- the sibling step, for its cleanup alone.
+run_notice() {
+  local name="$1"; shift
+  CASE="$(mktemp -d)/$name"; mkdir -p "$CASE"
+  export STUB_LOG="$CASE/log"; : > "$STUB_LOG"
+  export STUB_PUT_BODY="$CASE/put-body.txt"; : > "$STUB_PUT_BODY"
+  export STUB_POST_BODY="$CASE/post-body.txt"; : > "$STUB_POST_BODY"
+  export STUB_PUT=ok STUB_POST=ok STUB_DELETE=ok STUB_NOTICES=""
+  printf '{"summary":"the driver stopped before it wrote a verdict"}\n' > "$CASE/check.json"
+  export CHECK="$CASE/check.json"
+  export REPO=o/r PR=7 GH_TOKEN=stub
+  export NO_VERDICT_MARKER
+  export GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1
+  export RUNNER_TEMP="$CASE/tmp"; mkdir -p "$RUNNER_TEMP"
+  export GITHUB_OUTPUT="$CASE/output.txt"; : > "$GITHUB_OUTPUT"
+  for kv in "$@"; do export "${kv?}"; done
+  PATH="$HERE/bin-verdict:$PATH" bash "$NOTICE_SCRIPT" > "$CASE/out" 2>&1
+  echo "$?" > "$CASE/rc"
+}
+
+echo
+echo "the sibling step withdraws every earlier notice too"
+# Its cleanup is a near-duplicate of the one above. Untested, it can drift back to
+# taking the newest and ship green -- which is what happened before this case existed.
+run_notice notice-many STUB_NOTICES="201 202 203"
+check "all three withdrawn"         3 "$(calls 'DELETE')"
+check "the oldest among them"       1 "$(grep -c '^DELETE 201$' "$STUB_LOG")"
+check "and the newest"              1 "$(grep -c '^DELETE 203$' "$STUB_LOG")"
+check "and it posts its own"        1 "$(calls 'POST comment')"
+run_notice notice-none
+check "none to withdraw"            0 "$(calls 'DELETE')"
+check "it still posts"              1 "$(calls 'POST comment')"
+
+echo
+echo "a refused deletion is tolerated, at both sites"
+# The path that makes duplicates possible in the first place. Every id is still
+# attempted, the step does not die, and what it could not remove is named.
+run_notice notice-delete-refused STUB_NOTICES="201 202" STUB_DELETE=fail
+check "both attempted"              2 "$(calls 'DELETE')"
+check "the step survives"           0 "$(cat "$CASE/rc")"
+check "and names each"              2 "$(said 'could not withdraw the no-verdict notice')"
+check "it still posts its own"      1 "$(calls 'POST comment')"
+run_case carried-notices-refused STUB_NOTICES="101 102" STUB_DELETE=fail
+check "both attempted"              2 "$(calls 'DELETE')"
+check "the verdict still landed"    true "$(out posted)"
+check "and names each"              2 "$(said 'could not withdraw the no-verdict notice')"
 
 echo "assertions: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

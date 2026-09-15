@@ -46,6 +46,9 @@ case "$joined" in
     for a in "${ARGV[@]}"; do
       case "$a" in */comments/*) printf 'DELETE %s\n' "${a##*/comments/}" >> "$STUB_LOG" ;; esac
     done
+    # The tolerated-failure path. It is the reason duplicates accumulate at all, so a
+    # case has to be able to reach it rather than only the happy one.
+    [ "${STUB_DELETE:-ok}" = ok ] || { printf '{"message":"nope","status":"404"}\n'; exit 1; }
     exit 0 ;;
 
   # The stale no-verdict notice the step withdraws once its own verdict lands.

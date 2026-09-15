@@ -1237,6 +1237,11 @@ jobs:
       # a just-closed pull request cancels the in-flight close -- and close is the
       # only thing that reclaims a sandbox.
       #
+      # What it costs is the other direction: a review and a close for one pull request
+      # land in different groups and can run at once, so a close can delete the session
+      # a review turn is using. Whether that is safe is sei-agent-driver's answer and
+      # not this file's, which is why the group still reads this way. PLT-1274.
+      #
       # The event's own number is the third term's fallback, and it is load-bearing:
       # a close arriving as a pull_request event skips the guard, so the guard's
       # number is empty there. Without it every reclaim run shares one group, and
@@ -2795,20 +2800,31 @@ jobs:
           # every publisher names commit A while the model read commit B. A push does
           # not cancel this run, so nothing corrects it afterwards.
           #
-          # Only the approval is gated on it, for the reason the empty-sha branch below
-          # gives: a comment and a block stay true of code nobody read, and an approval
-          # does not. This is the stale-sha half of the same asymmetry.
+          # THREE answers, not two: `same`, `moved`, and `unknown` -- because the two
+          # readers below want opposite things from the third one, and collapsing it
+          # into `moved=false` gave them both the approval's answer.
           #
-          # A read that fails leaves this false and the vote stands. The window is
-          # seconds, and refusing an approval on an unanswered question would cost the
-          # common case to guard the rare one.
-          moved=false
+          # `unknown` is a commit that was never recorded, or a read that failed or came
+          # back as something that is not a sha. It is not `same`. The approval treats
+          # it as one, deliberately: the window is seconds, and refusing an approval on
+          # an unanswered question would cost the common case to guard the rare one.
+          #
+          # The WITHDRAWAL cannot. It is the one publisher whose mistake does not heal:
+          # a block left standing is cleared by the next review, and a block cleared on
+          # a head nobody confirmed needs a human to put back. So it requires `same` and
+          # treats `unknown` as `moved`. That asymmetry is the whole reason this is three
+          # states rather than a boolean.
+          head_state=unknown
           if [ -n "$head_sha" ]; then
             now="$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null || true)"
             case "$now" in (''|*[!0-9a-f]*) now="" ;; esac
-            if [ -n "$now" ] && [ "$now" != "$head_sha" ]; then
-              moved=true
-              echo "::warning::$REPO#$PR moved from $head_sha to $now while this review ran; what it publishes names the commit it read, and its approval is downgraded to a comment"
+            if [ -n "$now" ]; then
+              if [ "$now" = "$head_sha" ]; then
+                head_state=same
+              else
+                head_state=moved
+                echo "::warning::$REPO#$PR moved from $head_sha to $now while this review ran; what it publishes names the commit it read, so it does not approve and does not clear an earlier block"
+              fi
             fi
           fi
 
@@ -2838,7 +2854,7 @@ jobs:
               # nothing blocking, and the position it does not take is the one it
               # cannot stand behind.
               if [ "$APPROVE_ON_SUCCESS" = "true" ]; then
-                if [ -n "$head_sha" ] && [ "$moved" = false ]; then
+                if [ -n "$head_sha" ] && [ "$head_state" != moved ]; then
                   event=APPROVE
                   note="review found nothing blocking."
                 elif [ -z "$head_sha" ]; then
@@ -3010,17 +3026,21 @@ jobs:
             echo "::notice::a $conclusion review that wrote nothing down does not clear an earlier block on $REPO#$PR"
             exit 0
           fi
-          # A dismissal asserts the current head is clean, which is the same class of
-          # claim as an approval -- so it takes the same guard. This review read commit
-          # A; if the pull request is on B now, the block it would clear guards code
-          # this run never saw, and clearing it hands a merge gate away on a diff
-          # nobody reviewed.
+          # A dismissal asserts the current head is clean, so it needs the head
+          # CONFIRMED -- not merely unrefuted. A commit that was never recorded and a
+          # read that failed are both `unknown`, and clearing a block on either hands a
+          # merge gate away with nothing having checked the diff it now guards.
           #
-          # Leaving the block standing is the recoverable direction. The next review
-          # clears it, where a block wrongly cleared needs a human to put back -- the
-          # same reason the approval downgrades rather than proceeding.
-          if [ "$moved" = true ]; then
-            echo "::warning::$REPO#$PR moved while this review ran, so it does not clear an earlier block; that block guards a commit this review did not read, and the next review clears it"
+          # This is where the approval's rule must not be reused. That one treats
+          # `unknown` as good enough because a wrong approval is corrected by the next
+          # review. A wrongly cleared block is not: nothing in this workflow puts a
+          # block back, so the cost lands on a human. Leaving it standing is the
+          # direction that heals -- the next review clears it.
+          if [ "$head_state" != same ]; then
+            case "$head_state" in
+              moved) echo "::warning::$REPO#$PR moved while this review ran, so it does not clear an earlier block; that block guards a commit this review did not read, and the next review clears it" ;;
+              *)     echo "::warning::this run could not confirm which commit $REPO#$PR holds, so it does not clear an earlier block; a block cleared on an unconfirmed head needs a human to put back, and the next review that can confirm one clears it" ;;
+            esac
             exit 0
           fi
           # A driver that writes no counts leaves the three states indistinguishable, and
@@ -3463,7 +3483,7 @@ jobs:
           # either way.
           echo "posted=$posted" >> "$GITHUB_OUTPUT"
           if [ "$posted" = true ]; then
-            # An earlier run may have left a notice saying this review did not complete.
+            # Earlier runs may have left notices saying this review did not complete.
             # It did, so that notice now asserts a state that is not true and links a run
             # that is not the latest. The check run supersedes itself on the new commit;
             # a comment does not, so this withdraws it.
@@ -3831,8 +3851,8 @@ jobs:
           CHECK: ${{ steps.drive.outputs.check_path }}
         run: |
           set -euo pipefail
-          # Removes the standing no-verdict notice, if there is one, so exactly one is
-          # ever on the pull request.
+          # Removes every no-verdict notice standing on the pull request, so this run's
+          # own is the only one left.
           #
           # Matched on the marker at the start of the body, and only on this tool's own
           # comments, so a person quoting the marker cannot have their comment deleted.
@@ -3883,7 +3903,7 @@ jobs:
             '**This review did not complete.** It reached no verdict, so there is no review of this change to act on.' \
             "$reason" \
             "Read this run for the rest: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
-          # One notice per pull request: the previous one is deleted and a new one is
+          # One notice per pull request: every earlier one is deleted and a new one is
           # posted. The verdict comment accumulates on purpose -- an author compares
           # this review against the last one -- but a notice that the review did not
           # complete carries no such history, and an outage on a caller wired to every

@@ -54,7 +54,7 @@ run_case() {
   # against one, so "did not withdraw" is a decision the step made rather than a list
   # that happened to be empty.
   STUB_LOG="$log" STUB_STANDING=11 PATH="$HERE/bin-decision:$PATH" \
-  GH_TOKEN=stub REPO=o/r PR=7 REVIEWED_SHA="${SHA-deadbeef}" STUB_HEAD="${STUB_HEAD-}" \
+  GH_TOKEN=stub REPO=o/r PR=7 REVIEWED_SHA="${SHA-deadbeef}" STUB_HEAD="${STUB_HEAD-deadbeef}" \
   CHECK="$check" APPROVE_ON_SUCCESS="$approve" VERDICT_MARKER="$MARKER" \
     bash "$SCRIPT" > "$dir/out" 2>&1
 
@@ -116,9 +116,12 @@ echo "an approval names the commit it read, or it is not an approval"
 # The withdrawal column tracks the CONCLUSION, not the event, so it reads the same
 # here as it does for the cases above that carry a commit: this change moves the
 # approve arm alone and leaves the merge gate exactly where it was.
-SHA='' run_case "approve, no recorded commit" approve success true COMMENT yes
+# An unrecorded commit is `unknown` for both publishers: the approval downgrades and
+# the withdrawal refuses. It used to clear the block, which is the same hole the
+# unreadable-head cases below cover -- nothing had confirmed the diff it now guards.
+SHA='' run_case "approve, no recorded commit" approve success true COMMENT no
 SHA='' run_case "request_changes, no commit"  request_changes failure true REQUEST_CHANGES no
-SHA='' run_case "comment, no commit"          comment neutral true COMMENT yes
+SHA='' run_case "comment, no commit"          comment neutral true COMMENT no
 
 echo
 echo "an approval does not outlive the commit it read"
@@ -127,18 +130,26 @@ echo "an approval does not outlive the commit it read"
 # the model read commit B. A push does not cancel the run, so nothing corrects it.
 # Only the approval is gated on it, for the same reason the missing-sha branch is.
 #
-# The withdrawal takes the same guard, and the pair below is what isolates it: the
-# same clean review withdraws on an unmoved head and does not on a moved one. A
-# dismissal asserts the current head is clean, so clearing a block after the head
-# moved hands a merge gate away on a diff nobody reviewed. The block standing is
-# recoverable -- the next review clears it -- where a block wrongly cleared needs a
-# human to put back.
+# The withdrawal takes a STRONGER form of the same guard, and these cases are what
+# separate the two. The head question has three answers, and the two publishers want
+# opposite things from the third:
+#
+#   same     -> approve, and clear a block
+#   moved    -> neither
+#   unknown  -> approve (a wrong approval is corrected by the next review), but do
+#               NOT clear a block (nothing here puts a cleared block back, so that
+#               one lands on a human)
+#
+# `unknown` is a commit that was never recorded, or a head read that failed. Both
+# used to read as `same` for both publishers, which is the hole: a block could be
+# cleared with nothing having confirmed the diff it now guards.
 STUB_HEAD=deadbeef run_case "approve, head unmoved"   approve success true APPROVE yes
 STUB_HEAD=cafebabe run_case "approve, head moved"     approve success true COMMENT no
 STUB_HEAD=cafebabe run_case "block survives a push"   request_changes failure true REQUEST_CHANGES no
-# The read itself failing is not an answer, and withholding the vote on an unanswered
-# question would cost the common case to guard the rare one.
-run_case "approve, head unreadable"                   approve success true APPROVE yes
+STUB_HEAD=cafebabe run_case "comment, head moved"     comment neutral true COMMENT no
+# The head read failing: still approves, never clears.
+STUB_HEAD='' run_case "approve, head unreadable"      approve success true APPROVE no
+STUB_HEAD='' run_case "comment, head unreadable"      comment neutral true COMMENT no
 
 echo "assertions: $passed passed, $failed failed"
 rm -f "$SCRIPT"
