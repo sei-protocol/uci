@@ -1109,7 +1109,23 @@ jobs:
             # next push is what clears it.
             #
             # A dismissed review reads as DISMISSED, so what this finds is a block that
-            # is still standing. The same shape the withdrawal itself looks for.
+            # is still standing.
+            #
+            # It has to select what the WITHDRAWAL will actually dismiss, or this gate
+            # opens a review that cannot close what it opened for -- and then does it
+            # again on the next push, and every push after it, because the block it
+            # names never goes away. The marker alone selected, so a person who opened
+            # their blocking review by quoting this tool's previous verdict bypassed
+            # the once-per-pull-request gate for the life of the pull request.
+            #
+            # Held to the Bot test, which is the one the prior-verdict read below
+            # applies and the one that removes that case: a person is not a Bot. It is
+            # deliberately WIDER than the withdrawal's own test, which names the two
+            # logins exactly. The two fail in opposite directions and each is pointed
+            # the safe way: this one admits a review to go and look, costing a run,
+            # where the withdrawal refuses to mutate a review it does not own. What
+            # remains is another BOT opening its body with this tool's private marker,
+            # which is the same residue the prior-verdict read accepts.
             if [ "$re_review" = "false" ] && [ "$ACTION" = "synchronize" ]; then
               # A read that fails cannot rule a block out, so the gate admits and lets
               # the review look. That costs one review. A refusal costs the withdrawal
@@ -1119,7 +1135,8 @@ jobs:
               # shellcheck disable=SC2016  # $ENV is jq's own, and jq reads it
               blocked="$(GH_TOKEN="$GATE_TOKEN" \
                 gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
-                --jq '.[] | select(.state == "CHANGES_REQUESTED" and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
+                --jq '.[] | select(.user.type == "Bot" and .state == "CHANGES_REQUESTED"
+                             and ((.body // "") | startswith($ENV.VERDICT_MARKER))) | .id')" || read_ok=false
               if [ -n "$blocked" ]; then
                 echo "::notice::$REPO#$PR carries a block from this workflow, so this review runs to withdraw it"
                 re_review=true

@@ -518,6 +518,19 @@ run_case auto-reopened-unreadable "$ADMIT" EVENT_NAME=pull_request ACTION=reopen
   STUB_REVIEWS=FAIL
 check "a read that fails admits"              true  "$(out admit)"
 check "and says why"                          1     "$(said 'could not read the reviews or the comments')"
+# A block this workflow left exempts the push, so the run that withdraws it can
+# happen. A block it did NOT leave must not, and the two reads have to agree on
+# that: the withdrawal dismisses only this tool's own, so a gate that opened on a
+# person's review would re-review on this push and on every push after it, never
+# clearing the block it named.
+run_case auto-block-bot "$ADMIT" EVENT_NAME=pull_request ACTION=synchronize BASE_REPO_ID=1 HEAD_REPO_ID=1 \
+  STUB_REVIEWS=blocked STUB_COMMENTS=verdict
+check "this tool's own block earns a run"     true  "$(out admit)"
+check "and says why"                          1     "$(said 'carries a block from this workflow')"
+run_case auto-block-human "$ADMIT" EVENT_NAME=pull_request ACTION=synchronize BASE_REPO_ID=1 HEAD_REPO_ID=1 \
+  STUB_REVIEWS=blocked-human STUB_COMMENTS=verdict
+check "a person's block earns none"           false "$(out admit)"
+check "and the verdict gate holds"            1     "$(said 'comment @seidroid review to ask for one')"
 run_case auto-fork "$ADMIT" EVENT_NAME=pull_request ACTION=opened BASE_REPO_ID=1 HEAD_REPO_ID=2
 check "a fork pull request"                   false "$(out admit)"
 check "and spends no API call"                0     "$(calls origin)"

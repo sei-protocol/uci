@@ -70,7 +70,12 @@ case "$joined" in
     log "CALL reviews"
     [ "${STUB_REVIEWS:-none}" = "FAIL" ] && refuse reviews
     case "${STUB_REVIEWS:-none}" in
-      blocked) serve "[{\"id\":11,\"state\":\"CHANGES_REQUESTED\",\"body\":\"${VERDICT_MARKER}a block\"}]" ;;
+      blocked) serve "[{\"id\":11,\"user\":{\"type\":\"Bot\"},\"state\":\"CHANGES_REQUESTED\",\"body\":\"${VERDICT_MARKER}a block\"}]" ;;
+      # A person's blocking review that opens by quoting this tool's verdict. The
+      # withdrawal will not dismiss it -- it is not this tool's to dismiss -- so the
+      # standing-block read must not name it either, or every push re-reviews to
+      # clear a block that never clears.
+      blocked-human) serve "[{\"id\":12,\"user\":{\"type\":\"User\"},\"state\":\"CHANGES_REQUESTED\",\"body\":\"${VERDICT_MARKER}a person quoting it\"}]" ;;
       # A verdict that rode in the review carrying the inline comments. COMMENTED,
       # which is what the block check above must not select and the prior-review
       # check below must.
