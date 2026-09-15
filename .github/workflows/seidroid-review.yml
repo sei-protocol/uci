@@ -1,76 +1,17 @@
 name: seidroid review
 run-name: UCI / seidroid review / ${{ (github.event.issue.number || github.event.pull_request.number) && format('#{0}', github.event.issue.number || github.event.pull_request.number) || github.ref_name }}
-# Reusable, comment-triggered agentic PR review, driven by the sei-agent-driver
-# binary from sei-protocol/sei-internal-skills. That module is where the reviewer's
-# logic and its prompt live; this file is the GitHub wiring around it, and the two
-# are versioned separately -- `uses:` pins this file, and this file pins the binary
-# through the `driver-version` default. A thin caller in the reviewed repo wires the
-# triggers and calls this with `uses:`. Flow: comment `@seidroid review` on a pull
-# request -> guard gate -> install and run the driver over one managed omnigent
-# session -> post the verdict as a new comment, the findings it can place, and its
-# check runs.
+# Reusable, comment-triggered agentic pull request review. The reviewer's logic and
+# its prompt live in the sei-agent-driver binary from sei-protocol/sei-internal-skills;
+# this file is the GitHub wiring around it, pinned through the `driver-version`
+# default. A thin caller in the reviewed repository wires the triggers and calls this
+# with `uses:`.
 #
-# TWO PATHS, one review. An AUTOMATIC review runs on `pull_request` when the caller
-# wires that trigger and passes `mode: review`. A MANUAL one runs when a person writes
-# `@seidroid review` on the pull request: on the conversation, in a diff thread, or in
-# a review body. Both spend model quota and hold a sandbox, so both are gated -- see
-# the guard below. Both paths refuse a fork-originated pull request. The automatic path
-# reviews a pull request once. It reviews a later push only where the caller sets
-# `re-review-on-push`, or where a block of its own stands. It also refuses a draft and
-# honours the skip-review label. The manual path additionally checks who is asking.
+# It REPLACES ai-review.yml rather than running beside it: a repository that wires the
+# automatic path here should retire that caller in the same change, or every pull
+# request is reviewed twice.
 #
-# FOUR EVENTS reach this file, and the guard refuses any other by name: `pull_request`
-# for the automatic path, and `issue_comment`, `pull_request_review_comment` and
-# `pull_request_review` for the manual one. A caller wires the ones it wants.
-#
-# This file is the automation of record. It REPLACES `ai-review.yml` rather than
-# running beside it; a repository that wires the automatic path here should retire
-# that caller in the same change, or every pull request is reviewed twice.
-#
-# The driver is installed with `go install` at `driver-version`, which defaults to the
-# release this file drives, so every caller that omits the input runs one driver and one
-# conclusion vocabulary. The install step checks the binary it got against that contract
-# and fails there, before the review spends quota or takes a sandbox. The session is
-# keyed on the pull request and OUTLIVES the run, which is why `mode: close` exists:
-# it is the only thing that reclaims a sandbox.
-#
-# What changed versus the Python driver's workflow, and why:
-#   - No runtime dependency install of the reviewer itself. The binary comes from
-#     `go install` against the module's committed go.sum, so no package-manager
-#     step runs unpinned code on a runner that is about to hold a live credential.
-#   - No curl mint step, and no bearer token ever appears in a step output.
-#     The driver mints its own session bearer in-process from
-#     OMNIGENT_MACHINE_CLIENT_ID + OMNIGENT_MACHINE_CLIENT_SECRET
-#     (client_credentials). The secret is wired as JOB-level env on the
-#     `review` job below, never as step-level env on a `uses:` step --
-#     step-level env on a `uses:` step does not reach a composite action, and
-#     that exact defect broke every real run of the original Python workflow.
-#   - Every GitHub-supplied value (repo, PR number, comment id) is routed
-#     through env vars and read as "$VAR" in shell -- never interpolated as
-#     ${{ }} directly into a shell or jq command line, so a hostile PR title,
-#     branch name or comment body cannot inject shell/jq syntax.
-#   - The verdict file's ABSENCE means "no verdict to post", and no step writes a
-#     placeholder into it. A review that reaches none still publishes, because a
-#     pull request with no artifact on it reads as a review that never ran: the
-#     driver writes a failing check run to the same path it writes the deciding
-#     one, under the title `no verdict`, and a step of its own reports the run in
-#     a comment. Exactly one comment
-#     per review run either way. Neither takes a position on the pull request, and
-#     neither clears an earlier one -- a review that produced nothing has no
-#     position to state.
-#   - The outcome is surfaced even when the driver exits non-zero. The
-#     surfacing steps gate on whether a verdict was produced rather than on
-#     the exit code, so a review that reached one still posts it whatever else
-#     went wrong; `!cancelled()` rather than `success()` keeps that true while
-#     still skipping a run superseded by a newer trigger. Every surfacing step
-#     skips such a run. One step does not, and it is the last in the job: it
-#     withdraws the reactions a cancelled run left on the trigger comment, and
-#     it reads no verdict, so it can state no outcome.
-#   - allow-tools is a workflow input, defaulting to Bash,Read because the
-#     prompt's first step is a shell command and a declined prompt therefore
-#     produces a turn that reports it could not read the diff. Its access
-#     control is the trigger gate above, not the allowlist -- see
-#     https://github.com/sei-protocol/sei-internal-skills/blob/main/sei-agent-driver/cmd/sei-agent-driver/README.md
+# The driver's session outlives the run, which is why `mode: close` exists -- it is the
+# only thing that reclaims a sandbox.
 on:
   workflow_call:
     inputs:
