@@ -404,6 +404,51 @@ def main():
                 not (runs and reads),
             )
 
+    # === every gh api that sends a parameter names its method ================
+    #
+    # Stated over the file rather than over a list of calls, so it covers a step added
+    # later. gh sends GET only while no parameter is supplied: one -f or -F flips the
+    # request to POST and moves the parameters from the query string into a JSON body.
+    # A read written that way reaches a route that does not exist, and the 404 it takes
+    # back is indistinguishable from the thing it was asking about being absent.
+    #
+    # That is not a hypothetical. `Read the base branch's accepted conditions` shipped
+    # as `gh api "repos/.../contents/$file" -f ref=...`, which 404'd on every run and
+    # logged "no standards file" for a repository that had one -- so the base branch's
+    # Accepted list never reached the driver.
+    #
+    # The rule is the narrow one that catches it: a call carrying -f/-F must say -X or
+    # --method. A call with no parameter is a GET already and needs nothing.
+    print("\n== every gh api sending a parameter names its method")
+    import re as _re
+    calls = 0
+    for job in doc["jobs"].values():
+        for st in job.get("steps", []):
+            run = st.get("run")
+            if not run:
+                continue
+            # Join continuations so one call reads as one line.
+            flat = run.replace("\\\n", " ")
+            for line in flat.splitlines():
+                if "gh api" not in line or line.lstrip().startswith("#"):
+                    continue
+                body = line[line.index("gh api"):]
+                # graphql is the one endpoint that is a POST by definition, and every
+                # query rides in a parameter. Naming a method there would say nothing.
+                if _re.match(r"gh api\s+graphql(?![\w-])", body):
+                    continue
+                sends = _re.search(r"(?<![\w-])-(?:f|F|-field|-raw-field)(?![\w-])", body)
+                names = _re.search(r"(?<![\w-])(?:-X|--method)(?![\w-])", body)
+                if not sends:
+                    continue
+                calls += 1
+                check(
+                    f"{label(st, 0)}: {body.strip()[:72]}",
+                    True,
+                    bool(names),
+                )
+    check("the rule found calls to check", True, calls > 0)
+
     print(f"\nassertions: {passed} passed, {failed} failed")
     return 1 if failed else 0
 

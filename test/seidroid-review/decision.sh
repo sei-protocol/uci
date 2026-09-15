@@ -31,6 +31,9 @@ passed=0; failed=0
 # The withdrawal column is not decoration. It is the only thing in this job that
 # clears a merge gate, and splitting the decision from the conclusion gave it two new
 # ways to fire when it must not.
+# SHA is the commit `Record the commit under review` left. Every case runs with one
+# unless it clears it: that step is continue-on-error, and what an empty value costs
+# is not the same for every event this step can post.
 run_case() {
   local name="$1" decision="$2" conclusion="$3" approve="$4" want="$5" want_wd="${6:-no}"
   local dir; dir="$(mktemp -d)"
@@ -51,7 +54,7 @@ run_case() {
   # against one, so "did not withdraw" is a decision the step made rather than a list
   # that happened to be empty.
   STUB_LOG="$log" STUB_STANDING=11 PATH="$HERE/bin-decision:$PATH" \
-  GH_TOKEN=stub REPO=o/r PR=7 REVIEWED_SHA=deadbeef \
+  GH_TOKEN=stub REPO=o/r PR=7 REVIEWED_SHA="${SHA-deadbeef}" \
   CHECK="$check" APPROVE_ON_SUCCESS="$approve" VERDICT_MARKER="$MARKER" \
     bash "$SCRIPT" > "$dir/out" 2>&1
 
@@ -102,6 +105,20 @@ echo "half a check file costs half the step, not all of it"
 # block on a finding this run did not reproduce, which only a human can then clear.
 run_case "no decision field"            ""              success true  ""              yes
 run_case "unrecognised decision"        banana          success true  ""              yes
+
+echo
+echo "an approval names the commit it read, or it is not an approval"
+# The fallback the API offers -- default to the pull request's current head -- is the
+# weaker guarantee for a comment and for a block: both stay true of code nobody read.
+# An approval asserts something about a specific diff, and under approve-on-success
+# with an approval-count rule it IS the merge gate. So the approve arm alone requires
+# the recorded sha, and downgrades rather than dropping the review.
+# The withdrawal column tracks the CONCLUSION, not the event, so it reads the same
+# here as it does for the cases above that carry a commit: this change moves the
+# approve arm alone and leaves the merge gate exactly where it was.
+SHA= run_case "approve, no recorded commit" approve success true COMMENT yes
+SHA= run_case "request_changes, no commit"  request_changes failure true REQUEST_CHANGES no
+SHA= run_case "comment, no commit"          comment neutral true COMMENT yes
 
 echo "assertions: $passed passed, $failed failed"
 rm -f "$SCRIPT"

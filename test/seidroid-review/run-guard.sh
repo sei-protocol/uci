@@ -271,6 +271,19 @@ for ev in pull_request issue_comment pull_request_review_comment pull_request_re
   check "$ev passes"                          0 "$(rc)"
   check "$ev says nothing"                    0 "$(cried '::')"
 done
+# The mode axis. workflow_call has no enum, so a typo reaches every
+# `inputs.mode == 'review'` test, matches none, and the run reports success having
+# reviewed nothing. The two it handles pass; anything else is named and refused.
+run_case refuse-mode "$REFUSE" EVENT_NAME=pull_request MODE=reveiw
+check "rc"                                    1 "$(rc)"
+check "names the mode"                        1 "$(cried "mode 'reveiw'")"
+check "names the two it handles"              1 "$(cried "it handles 'review' and 'close'")"
+run_case refuse-mode-empty "$REFUSE" EVENT_NAME=pull_request MODE=
+check "an empty mode is refused too"          1 "$(rc)"
+for m in review close; do
+  run_case "refuse-ok-mode-$m" "$REFUSE" EVENT_NAME=issue_comment "MODE=$m"
+  check "mode $m passes"                      0 "$(rc)"
+done
 
 echo
 echo "== 6. the parse: which body is a command, and what it resolves to =="

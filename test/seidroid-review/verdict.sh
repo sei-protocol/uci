@@ -35,7 +35,11 @@ for job in d["jobs"].values():
 sys.exit("step not found")
 PY
 }
-NO_VERDICT_MARKER="$(step_env NO_VERDICT_MARKER)" || exit 1
+# Workflow-level, beside the other two markers, and read the same way. Two steps
+# write this one -- the notice, and the verdict step that withdraws a stale one --
+# so reading it from the step would let the harness pass while those two drift.
+NO_VERDICT_MARKER="$(python3 "$HERE/extract.py" "$WORKFLOW" "$STEP" "$SCRIPT" NO_VERDICT_MARKER)" || {
+  echo "could not read NO_VERDICT_MARKER out of $WORKFLOW"; exit 1; }
 MAX_BODY_BYTES="$(step_env MAX_BODY_BYTES)" || exit 1
 NOTICE_BYTES="$(step_env NOTICE_BYTES)" || exit 1
 
