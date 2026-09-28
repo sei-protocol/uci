@@ -44,14 +44,14 @@ on:
 
           The module is nested, so the repository carries path-prefixed tags
           (sei-agent-driver/vX.Y.Z) while `go install` takes the bare version. Pass
-          `v0.21.0`; `sei-agent-driver/v0.21.0` is refused as a disallowed version
+          `v0.22.0`; `sei-agent-driver/v0.22.0` is refused as a disallowed version
           string. A commit sha resolves to a pseudo-version.
 
           Verify a pin from an EMPTY module cache: a warm one is a false green, because
           it resolves a pin the proxy may never have served.
         required: false
         type: string
-        default: 'v0.21.0'
+        default: 'v0.22.0'
       trigger-phrase:
         description: >-
           The mention a person types to ask for a review. The command is that phrase
@@ -1385,19 +1385,23 @@ jobs:
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
-          # Two releases are load-bearing in a way the list above does not cover, and
-          # the floor is the later of them. The position step submits `.decision` from
+          # Three releases are load-bearing in a way the list above does not cover, and
+          # the floor is the latest of them. The position step submits `.decision` from
           # the check file, only v0.20.0 and later write it, and a file without it costs
           # the review its position AND its withdrawal. v0.21.0 then renders the verdict
           # from the structured block alone -- summary first, inline findings counted in
           # their section rather than repeated, nits folded -- and that body is what the
           # placement step below publishes as the review carrying the inline comments.
           # An older driver publishes the model's prose there instead: a body written to
-          # stand beside the findings, posted as the thing that holds them.
+          # stand beside the findings, posted as the thing that holds them. v0.22.0
+          # waits out a server restart. The omnigent server runs one replica and
+          # has no server for about two minutes during each rollout. An older driver
+          # ends a live review on the first gateway 503 in that window, as exit 6,
+          # and a person has to re-run it.
           #
           # An older driver reaching the review path would take all of that silently,
           # which is why the floor is the gate rather than a default.
-          MIN_DRIVER_VERSION: 'v0.21.0'
+          MIN_DRIVER_VERSION: 'v0.22.0'
         run: |
           set -euo pipefail
           # An input default applies only when the caller omits the key. A caller that
