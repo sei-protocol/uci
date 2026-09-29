@@ -351,7 +351,7 @@ on:
       claude-model:
         description: >-
           Model to answer the review on, substituting for the one the agent's spec
-          names. The default pins Opus 5 with the 1M context window. Set it empty
+          names. The default pins Opus 5.5 with the 1M context window. Set it empty
           to leave the spec's own. Passed to the driver as SEIDROID_MODEL.
 
           The pin exists because the runner otherwise launches on the Claude CLI's
@@ -369,7 +369,7 @@ on:
           so another harness and another provider, and it keeps its spec's model.
         required: false
         type: string
-        default: 'claude-opus-5[1m]'
+        default: 'claude-opus-5-5[1m]'
       allow-tools:
         description: >-
           Comma-separated tool_name values to accept. This deployment does stamp
@@ -1379,9 +1379,10 @@ jobs:
           # one of those is wrong for the others, so this file serves one and refuses the
           # rest.
           #
-          # Move this with the driver-version default above: one value in two places,
-          # and nothing enforces it. The two mistakes are not symmetric. Raising this
-          # alone fails every caller that omits the input, at once and in the open.
+          # Move this with the driver-version default above and the two sha256 pins
+          # below: one release in three places, and nothing enforces it. The two
+          # mistakes are not symmetric. Raising this alone fails every caller that
+          # omits the input, at once and in the open.
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
@@ -1402,6 +1403,14 @@ jobs:
           # An older driver reaching the review path would take all of that silently,
           # which is why the floor is the gate rather than a default.
           MIN_DRIVER_VERSION: 'v0.22.0'
+          # The sha256 of the MIN_DRIVER_VERSION release archives, from that release's
+          # checksums.txt. They move with MIN_DRIVER_VERSION and the driver-version
+          # default: one release, three places. The install below downloads the
+          # prebuilt binary only when it can match these bytes. So swapping the binary
+          # takes a change to this reviewed file as well as to the release. Any other
+          # version, or a missing or unreachable release, builds with go install.
+          DRIVER_SHA256_LINUX_AMD64: '8d546fa5de27f5227085d3f1d9ec83f9164f875b0ec13369541caf3ac3d9e54e'
+          DRIVER_SHA256_LINUX_ARM64: '0d2f0baa23145c01cd96b035c9aeb89a0e249003fd0b2973a945d864d68876dc'
         run: |
           set -euo pipefail
           # An input default applies only when the caller omits the key. A caller that
@@ -1411,26 +1420,64 @@ jobs:
           # than by the comment below asking.
           DRIVER_VERSION="${DRIVER_VERSION:-$MIN_DRIVER_VERSION}"
 
-          # sei-internal-skills is public, so there is no credential and no
-          # GOPRIVATE. The module path below is absolute and did not change when this
-          # file moved: the driver stays there.
-          #
-          # The driver is a NESTED module. The repository carries path-prefixed tags
-          # (sei-agent-driver/vX.Y.Z) and `go install` refuses one as a disallowed
-          # version string; what it takes is the bare version, `v0.20.0`. A sha becomes
-          # a pseudo-version.
           out="$RUNNER_TEMP/bin"
-          GOBIN="$out" go install \
-            "github.com/sei-protocol/sei-internal-skills/sei-agent-driver/cmd/sei-agent-driver@${DRIVER_VERSION}"
           bin="$out/sei-agent-driver"
-          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+          mkdir -p "$out"
 
-          # What go install resolved, read from the build info the toolchain stamped
-          # rather than from the binary's own --version, so a driver that changed how
-          # it reports itself still answers this. A sha pin reads here as the
-          # pseudo-version it became, so the log names exactly what reviewed.
-          version="$(go version -m "$bin" | awk '$1 == "mod" { print $3; exit }')"
-          echo "installed sei-agent-driver $version"
+          # The prebuilt release binary comes first. A download takes about a second.
+          # go install takes 20-50s and depends on proxy.golang.org and
+          # sum.golang.org, and a stream error from either has failed a review
+          # outright. The release is sei-internal-skills' plain vX.Y.Z tag (goreleaser),
+          # not the path-prefixed module tag.
+          want=""
+          if [ "$DRIVER_VERSION" = "$MIN_DRIVER_VERSION" ] && [ "$RUNNER_OS" = "Linux" ]; then
+            case "$RUNNER_ARCH" in
+              X64) arch=amd64; want="$DRIVER_SHA256_LINUX_AMD64" ;;
+              ARM64) arch=arm64; want="$DRIVER_SHA256_LINUX_ARM64" ;;
+            esac
+          fi
+          version=""
+          if [ -n "$want" ]; then
+            archive="sei-agent-driver_${DRIVER_VERSION#v}_linux_${arch}.tar.gz"
+            url="https://github.com/sei-protocol/sei-internal-skills/releases/download/${DRIVER_VERSION}/${archive}"
+            if curl -fsSL --retry 3 --retry-all-errors --max-time 60 -o "$RUNNER_TEMP/$archive" "$url"; then
+              # A mismatch is not a network fault. It means the release no longer
+              # holds the bytes this file pins, so the review stops here rather than
+              # building around it.
+              if ! printf '%s  %s\n' "$want" "$RUNNER_TEMP/$archive" | sha256sum -c --quiet -; then
+                echo "::error::driver install: $archive does not match the sha256 this workflow pins for $DRIVER_VERSION"
+                exit 1
+              fi
+              tar -xzf "$RUNNER_TEMP/$archive" -C "$out" sei-agent-driver
+              # goreleaser builds from a checkout, so the build info names the main
+              # module (devel). The version is the one whose pinned bytes just matched.
+              version="$DRIVER_VERSION"
+              echo "installed sei-agent-driver $version from the release binary"
+            else
+              echo "::warning::could not download $url; building with go install instead"
+            fi
+          fi
+
+          if [ -z "$version" ]; then
+            # sei-internal-skills is public, so there is no credential and no
+            # GOPRIVATE. The module path below is absolute and did not change when this
+            # file moved: the driver stays there.
+            #
+            # The driver is a NESTED module. The repository carries path-prefixed tags
+            # (sei-agent-driver/vX.Y.Z) and `go install` refuses one as a disallowed
+            # version string; what it takes is the bare version, `v0.20.0`. A sha becomes
+            # a pseudo-version.
+            GOBIN="$out" go install \
+              "github.com/sei-protocol/sei-internal-skills/sei-agent-driver/cmd/sei-agent-driver@${DRIVER_VERSION}"
+
+            # What go install resolved, read from the build info the toolchain stamped
+            # rather than from the binary's own --version, so a driver that changed how
+            # it reports itself still answers this. A sha pin reads here as the
+            # pseudo-version it became, so the log names exactly what reviewed.
+            version="$(go version -m "$bin" | awk '$1 == "mod" { print $3; exit }')"
+            echo "installed sei-agent-driver $version with go install"
+          fi
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
 
           # THE CONTRACT CHECK. It fails here, before the driver holds a credential,
           # opens a session or spends model quota -- a driver this file cannot drive
