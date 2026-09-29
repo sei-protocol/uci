@@ -1380,8 +1380,9 @@ jobs:
           # rest.
           #
           # Move this with the driver-version default above and the two sha256 pins
-          # below: one release in three places, and nothing enforces it. The two mistakes are not symmetric. Raising this
-          # alone fails every caller that omits the input, at once and in the open.
+          # below: one release in three places, and nothing enforces it. The two
+          # mistakes are not symmetric. Raising this alone fails every caller that
+          # omits the input, at once and in the open.
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
@@ -1419,14 +1420,6 @@ jobs:
           # than by the comment below asking.
           DRIVER_VERSION="${DRIVER_VERSION:-$MIN_DRIVER_VERSION}"
 
-          # sei-internal-skills is public, so there is no credential and no
-          # GOPRIVATE. The module path below is absolute and did not change when this
-          # file moved: the driver stays there.
-          #
-          # The driver is a NESTED module. The repository carries path-prefixed tags
-          # (sei-agent-driver/vX.Y.Z) and `go install` refuses one as a disallowed
-          # version string; what it takes is the bare version, `v0.20.0`. A sha becomes
-          # a pseudo-version.
           out="$RUNNER_TEMP/bin"
           bin="$out/sei-agent-driver"
           mkdir -p "$out"
