@@ -2106,6 +2106,92 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Decide the review's position
+        id: position
+        if: ${{ inputs.mode == 'review' && !cancelled()
+          && steps.drive.outputs.verdict_produced == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.identity.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr_number }}
+          REVIEWED_SHA: ${{ steps.head.outputs.sha }}
+          CHECK: ${{ steps.drive.outputs.check_path }}
+          APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$CHECK" ]; then
+            echo "no conclusion to take a position from"
+            exit 0
+          fi
+          decision="$(jq -r '.decision // empty' "$CHECK" || true)"
+          if [ -z "$decision" ]; then
+            echo "::warning::the check file names no decision, so no position is recorded on $REPO#$PR; the position step's withdrawal still runs, on the conclusion"
+          fi
+          conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
+          if [ -z "$conclusion" ]; then
+            echo "::warning::the check file names no conclusion, so no block is withdrawn on $REPO#$PR; an earlier one stands until a run that reads one"
+            conclusion="unknown"
+          fi
+
+          head_sha="${REVIEWED_SHA:-}"
+          if [ -z "$head_sha" ]; then
+            echo "::warning::the reviewed commit was not recorded; the position goes on the current head of $REPO#$PR, which the review may not have read"
+          fi
+
+          head_state=unknown
+          if [ -n "$head_sha" ]; then
+            now="$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null || true)"
+            case "$now" in (''|*[!0-9a-f]*) now="" ;; esac
+            if [ -n "$now" ]; then
+              if [ "$now" = "$head_sha" ]; then
+                head_state=same
+              else
+                head_state=moved
+                echo "::warning::$REPO#$PR moved from $head_sha to $now while this review ran; what it publishes names the commit it read, so it does not approve and does not clear an earlier block"
+              fi
+            fi
+          fi
+
+          event=""
+          note=""
+          case "$decision" in
+            request_changes)
+              event=REQUEST_CHANGES
+              note="review found something blocking. The findings are on the lines they are about, and the summary is in this tool's verdict on this pull request."
+              ;;
+            approve)
+              if [ "$APPROVE_ON_SUCCESS" = "true" ]; then
+                if [ -n "$head_sha" ] && [ "$head_state" != moved ]; then
+                  event=APPROVE
+                  note="review found nothing blocking."
+                elif [ -z "$head_sha" ]; then
+                  event=COMMENT
+                  note="review found nothing blocking. It does not approve: the commit it read was not recorded, so an approval here would name whatever is at the head of this pull request now."
+                  echo "::warning::the reviewed commit was not recorded on $REPO#$PR, so this review comments where it would have approved; an approval would have named a commit the review may not have read"
+                else
+                  event=COMMENT
+                  note="review found nothing blocking in the commit it read. It does not approve: this pull request was pushed to while the review ran, so the approval would stand against code the review never saw. Ask for another review to have the new commit read."
+                fi
+              fi
+              ;;
+            comment)
+              if [ "$conclusion" != "success" ]; then
+                event=COMMENT
+                note="review took no position. Its verdict on this pull request names the finding that withheld approval."
+              fi
+              ;;
+            "")
+              ;;
+            *)
+              echo "::warning::unrecognised decision \"$decision\" on $REPO#$PR; no position taken"
+              ;;
+          esac
+
+          { echo "event=$event"; echo "note=$note"; echo "conclusion=$conclusion"
+            echo "head_state=$head_state"; } >> "$GITHUB_OUTPUT"
+          echo "position: ${event:-none} for a $conclusion conclusion"
+
       - name: Place findings on the code
         id: place
         # Placement degrades in two steps rather than dropping a finding. The API
@@ -2128,10 +2214,6 @@ jobs:
         # somewhere else on the page. The verdict step below then posts nothing, and
         # falls back to a standalone comment only when this review does not land.
         #
-        # It is COMMENTED, and that is what keeps it clear of the two selectors that
-        # look for this marker: both the guard's block check and the withdrawal below
-        # require CHANGES_REQUESTED as well, so neither can reach a review posted here.
-        # The position this run takes stays the position step's alone.
         #
         # Each comment's superseded thread ids are recorded as that comment posts, and
         # the resolve step closes a thread only on finding its id in that record. So a
@@ -2154,6 +2236,7 @@ jobs:
           # severity, with the ones placed below counted in their section rather than
           # repeated here.
           VERDICT: ${{ steps.drive.outputs.verdict_path }}
+          EVENT: ${{ steps.position.outputs.event }}
           # Findings that reached neither a line nor a file, collected for the
           # summary. Declared here so the step below can read it by output.
           NOTE: ${{ runner.temp }}/review-unplaced.md
@@ -2169,6 +2252,48 @@ jobs:
           # record left by attempt 1 would close a thread on attempt 2's behalf.
           echo "linkage_path=$LINKAGE" >> "$GITHUB_OUTPUT"
           : > "$LINKAGE"
+          summary_posted=false review_id="" position_posted="" ambiguous=false
+
+          verdict_review() {
+            local payload out status
+            payload="$(jq -n --arg event "$1" --arg sha "${REVIEWED_SHA:-}" \
+                         --arg body "$VERDICT_MARKER"$'\n'"$(cat "$VERDICT")" \
+                         '{event: $event, body: $body}
+                          + (if $sha == "" then {} else {commit_id: $sha} end)')" || return 1
+            if out="$(printf '%s' "$payload" | gh api -X POST "repos/$REPO/pulls/$PR/reviews" --input -)"; then
+              printf '%s' "$out"
+              return 0
+            fi
+            status="$(printf '%s' "$out" | jq -r '.status // empty' 2>/dev/null || true)"
+            if [ "$status" = "422" ]; then
+              return 2
+            fi
+            return 1
+          }
+          carry_position() {
+            local out rc=0 used="${EVENT:-}"
+            [ "$summary_posted" = true ] && return 0
+            { [ -n "$used" ] && [ "$used" != COMMENT ] && [ "$ambiguous" = false ]; } || return 0
+            { [ -n "${VERDICT:-}" ] && [ -s "$VERDICT" ]; } || return 0
+            out="$(verdict_review "$used")" || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "::warning::$REPO#$PR would not take $used, so the review carrying the verdict is recorded as a comment"
+              used=COMMENT rc=0
+              out="$(verdict_review COMMENT)" || rc=$?
+            fi
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::the review carrying the verdict could not be posted on $REPO#$PR; the verdict step posts it as a comment, and the position step records the position"
+              return 0
+            fi
+            summary_posted=true position_posted="$used"
+            review_id="$(printf '%s' "$out" | jq -r '.id // empty' 2>/dev/null || true)"
+            case "$review_id" in (''|*[!0-9]*) review_id="" ;; esac
+            if [ -z "$review_id" ]; then
+              echo "::warning::the review carrying the verdict posted on $REPO#$PR but its id could not be read, so what the verdict step would append to it goes to this run's log"
+            fi
+            echo "posted the verdict on $REPO#$PR as a review recording $used"
+            return 0
+          }
           if [ ! -s "$FINDINGS" ]; then
             echo "no findings to place; the summary carries the review"
             # Zero, and not silence. Nothing was placed because there was nothing to
@@ -2179,8 +2304,10 @@ jobs:
             # which thread, and the resolve step picks its gate on it. Every path that
             # returns before reading a finding says false, so the answer to a question
             # this run never asked is the one that keeps a thread open.
+            carry_position
             { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"
-              echo "superseded_linked=false"; echo "summary_posted=false"; } >> "$GITHUB_OUTPUT"
+              echo "superseded_linked=false"; echo "summary_posted=$summary_posted"
+              echo "review_id=$review_id"; echo "position_posted=$position_posted"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # The commit the review read, recorded before it started and used as
@@ -2196,10 +2323,6 @@ jobs:
             echo "::warning::the reviewed commit was not recorded on $REPO#$PR; every finding goes to the summary instead of the diff"
           fi
           on_line=0 on_file=0 unplaced=0
-          # Whether the verdict reached the pull request in the review below, and the
-          # review that carries it. The verdict step reads both: the first decides
-          # whether it posts a comment at all, the second is what it appends to.
-          summary_posted=false review_id=""
 
           # The third rung, in two groups. A finding reaches the summary because the
           # diff has nowhere to attach it, or because the diff does carry its line and
@@ -2343,8 +2466,10 @@ jobs:
           normal="$RUNNER_TEMP/review-findings-normalised.json"
           if ! jq "$normalise" "$FINDINGS" > "$normal"; then
             echo "::warning::the findings file for $REPO#$PR could not be read, so this review places nothing on the diff"
+            carry_position
             { echo "on_line=0"; echo "on_file=0"; echo "unplaced=0"
-              echo "superseded_linked=false"; echo "summary_posted=false"; } >> "$GITHUB_OUTPUT"
+              echo "superseded_linked=false"; echo "summary_posted=$summary_posted"
+              echo "review_id=$review_id"; echo "position_posted=$position_posted"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # One finding naming a thread is the whole test. An older driver publishes the
@@ -2494,9 +2619,14 @@ jobs:
                 review_body="Findings on the changed lines. The verdict and the summary are in this tool's comment on this pull request."
                 echo "::warning::the driver left no verdict for the review on $REPO#$PR to carry, so it names where one will be and the verdict is posted on its own"
               fi
+              review_event=COMMENT
+              if [ "$carries_verdict" = true ] && [ -n "${EVENT:-}" ]; then
+                review_event="$EVENT"
+              fi
               # shellcheck disable=SC2016  # $sha and friends are jq's, bound by --arg
               jq --arg sha "$head_sha" --arg marker "$FINDING_MARKER" --arg body "$review_body" \
-                 '{commit_id: $sha, event: "COMMENT", body: $body,
+                 --arg event "$review_event" \
+                 '{commit_id: $sha, event: $event, body: $body,
                    comments: [ .anchored[]
                                | {path: .file, line: .line, side: .side,
                                   body: "\($marker)\n**\(.severity)** — \(.detail)"} ]}' \
@@ -2524,7 +2654,19 @@ jobs:
               # A call that reached no response leaves no status line, and an empty
               # code takes the summary. That is the case where the write may have
               # landed, so it is the case that must not be repeated.
+              landed=false
               if gh api -i -X POST "repos/$REPO/pulls/$PR/reviews" --input "$request" > "$response"; then
+                landed=true
+              elif [ "$review_event" != COMMENT ] \
+                   && [ "$(sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' "$response" || true)" = 422 ]; then
+                if jq '.event = "COMMENT"' "$request" > "$request.tmp" && mv "$request.tmp" "$request" \
+                   && gh api -i -X POST "repos/$REPO/pulls/$PR/reviews" --input "$request" > "$response"; then
+                  echo "::warning::$REPO#$PR would not take $review_event, so the review carrying the findings is recorded as a comment"
+                  review_event=COMMENT
+                  landed=true
+                fi
+              fi
+              if [ "$landed" = true ]; then
                 on_line=$((on_line + anchored))
                 # The call carries every anchored comment and creates all of them or
                 # none, so one write records the whole batch's linkage.
@@ -2540,6 +2682,9 @@ jobs:
                 # what would have been appended goes to the log instead.
                 if [ "$carries_verdict" = true ]; then
                   summary_posted=true
+                  if [ -n "${EVENT:-}" ] && [ "$EVENT" != COMMENT ]; then
+                    position_posted="$review_event"
+                  fi
                   # -i puts the status line and the headers ahead of the body, so the
                   # JSON begins after the first empty line. A value that is not a number
                   # is no id, and reaching the API with one would edit nothing and report
@@ -2558,6 +2703,7 @@ jobs:
                     echo "::warning::$REPO#$PR refused the review carrying $anchored comment(s) with $status; each finding is posted on its own instead"
                     place_each place_one to_summary_ondiff < <(rows '.anchored[]' "$placement") ;;
                   *)
+                    ambiguous=true
                     echo "::warning::the review carrying $anchored comment(s) could not be posted on $REPO#$PR; those findings are in the summary instead of on the diff"
                     place_each to_summary_ondiff '' < <(rows '.anchored[]' "$placement") ;;
                 esac
@@ -2568,6 +2714,7 @@ jobs:
           else
             place_each place_one to_summary < <(rows '.[]' "$normal")
           fi
+          carry_position
           # A heading per reason, because the summary collects findings for three and
           # only one of them is about code the reader did not change. With no commit to
           # attach to, a finding on a changed line lands here as well; so does one whose
@@ -2600,9 +2747,10 @@ jobs:
           # One append for all three, so the summary never reads a half-written set. It
           # requires all three for that reason, including the one no term renders.
           { echo "on_line=$on_line"; echo "on_file=$on_file"; echo "unplaced=$unplaced"
-            echo "summary_posted=$summary_posted"; echo "review_id=$review_id"; } >> "$GITHUB_OUTPUT"
+            echo "summary_posted=$summary_posted"; echo "review_id=$review_id"
+            echo "position_posted=$position_posted"; } >> "$GITHUB_OUTPUT"
           echo "findings: $on_line on a line, $on_file on a file, $unplaced in the summary"
-          echo "verdict carried by the review: $summary_posted"
+          echo "verdict carried by the review: $summary_posted, position recorded on it: ${position_posted:-none}"
 
       - name: Publish the review check run
         # The half of a review a reader sees without opening it. `review` is the check
@@ -2790,164 +2938,22 @@ jobs:
           PR: ${{ needs.guard.outputs.pr_number }}
           REVIEWED_SHA: ${{ steps.head.outputs.sha }}
           CHECK: ${{ steps.drive.outputs.check_path }}
-          APPROVE_ON_SUCCESS: ${{ inputs.approve-on-success }}
+          EVENT: ${{ steps.position.outputs.event }}
+          POSITION_NOTE: ${{ steps.position.outputs.note }}
+          CONCLUSION: ${{ steps.position.outputs.conclusion }}
+          HEAD_STATE: ${{ steps.position.outputs.head_state }}
+          CARRIED: ${{ steps.place.outputs.position_posted }}
         run: |
           set -euo pipefail
           if [ ! -s "$CHECK" ]; then
             echo "no conclusion to take a position from"
             exit 0
           fi
-          # jq's error goes to the log and the value comes back on stdout, so a check
-          # file this step cannot read states itself rather than arriving as data.
-          #
-          # The RECORDED decision, not a position this step re-derives from the
-          # conclusion. The driver decides both in one reading: `approve` only where
-          # nothing withholds -- the reply affirmed it read the diff, nothing blocks,
-          # and no pre-existing blocker stands unaccepted.
-          #
-          # Re-deriving here is what shipped a comment ending "Approving", a footer
-          # reading decision `approve`, a neutral check and NO REVIEW AT ALL, on three
-          # pull requests, with nothing on any of them saying why. Two computations of
-          # one question will disagree; this step no longer holds the second.
-          #
-          # `// empty` rather than a bare field. A missing value renders as the string
-          # "null", which every comparison below would take for a decision.
-          decision="$(jq -r '.decision // empty' "$CHECK" || true)"
-          if [ -z "$decision" ]; then
-            # Warned, not exited. This step does two things and they fail apart: a
-            # missing decision costs the POSITION, and taking the withdrawal with it
-            # would strand a block an earlier run left on a finding this run did not
-            # reproduce -- which only a human can then clear.
-            echo "::warning::the check file names no decision, so no position is recorded on $REPO#$PR; the withdrawal below still runs, on the conclusion"
-          fi
-          # The conclusion is still read, for the WITHDRAWAL at the end of this step and
-          # for the log lines that name it. The two answer different questions and the
-          # split is the point: `decision` is the position this run records on the pull
-          # request, and `conclusion` plus the counts decide whether this run has the
-          # standing to clear a block an EARLIER one left. Nothing below re-derives an
-          # event from it.
-          conclusion="$(jq -r '.conclusion // empty' "$CHECK" || true)"
-          if [ -z "$conclusion" ]; then
-            # The withdrawal is the one thing in this job that clears a merge gate, and
-            # it reads the conclusion to decide whether this run has the standing to.
-            # A sentinel that matched none of its branches would fall THROUGH it and
-            # dismiss the block anyway -- on a check file this step could not read.
-            # `unknown` is named in the guard below for that reason.
-            echo "::warning::the check file names no conclusion, so no block is withdrawn on $REPO#$PR; an earlier one stands until a run that reads one"
-            conclusion="unknown"
-          fi
-
-          # The commit the review read, recorded before it started and used as
-          # recorded. The head is not read again here, or in any other publisher: one
-          # read is the state this whole run publishes against.
-          #
-          # Empty only when that record failed. commit_id is optional on the reviews
-          # API and defaults to the pull request's latest commit, so the position
-          # still lands -- the weaker guarantee, stated rather than assumed. This is
-          # the one publisher that has a weaker version to fall back to.
+          event="${EVENT:-}"
+          note="${POSITION_NOTE:-}"
+          conclusion="${CONCLUSION:-unknown}"
+          head_state="${HEAD_STATE:-unknown}"
           head_sha="${REVIEWED_SHA:-}"
-          if [ -z "$head_sha" ]; then
-            echo "::warning::the reviewed commit was not recorded; the position goes on the current head of $REPO#$PR, which the review may not have read"
-          fi
-
-          # Whether the pull request moved while the review ran. The driver resolves
-          # the head itself and takes no commit from this file, so the recorded sha
-          # binds the PUBLISHERS and not the read: a push landing mid-review means
-          # every publisher names commit A while the model read commit B. A push does
-          # not cancel this run, so nothing corrects it afterwards.
-          #
-          # THREE answers, not two: `same`, `moved`, and `unknown` -- because the two
-          # readers below want opposite things from the third one, and collapsing it
-          # into `moved=false` gave them both the approval's answer.
-          #
-          # `unknown` is a commit that was never recorded, or a read that failed or came
-          # back as something that is not a sha. It is not `same`. The approval treats
-          # it as one, deliberately: the window is seconds, and refusing an approval on
-          # an unanswered question would cost the common case to guard the rare one.
-          #
-          # The WITHDRAWAL cannot. It is the one publisher whose mistake does not heal:
-          # a block left standing is cleared by the next review, and a block cleared on
-          # a head nobody confirmed needs a human to put back. So it requires `same` and
-          # treats `unknown` as `moved`. That asymmetry is the whole reason this is three
-          # states rather than a boolean.
-          head_state=unknown
-          if [ -n "$head_sha" ]; then
-            now="$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null || true)"
-            case "$now" in (''|*[!0-9a-f]*) now="" ;; esac
-            if [ -n "$now" ]; then
-              if [ "$now" = "$head_sha" ]; then
-                head_state=same
-              else
-                head_state=moved
-                echo "::warning::$REPO#$PR moved from $head_sha to $now while this review ran; what it publishes names the commit it read, so it does not approve and does not clear an earlier block"
-              fi
-            fi
-          fi
-
-          event=""
-          note=""
-          case "$decision" in
-            request_changes)
-              event=REQUEST_CHANGES
-              note="review found something blocking. The findings are on the lines they are about, and the summary is in this tool's verdict on this pull request."
-              ;;
-            approve)
-              # approve-on-success stays the caller's policy, and it is the only thing
-              # this step still decides. Where it is off, the review states its
-              # position in the comment and records none here.
-              #
-              # An approval also needs the commit. The fallback above -- let the API
-              # default to the pull request's current head -- is the weaker guarantee
-              # for a comment and for a block, and both stay true of code nobody read:
-              # a comment says something, a block withholds something. An approval
-              # ASSERTS something about a specific diff, so the same fallback would
-              # approve a commit pushed during the review, and under approve-on-success
-              # with an approval-count rule that approval is the gate. `Publish the
-              # review check run` refuses to exist without the commit for this reason;
-              # an approval is the same kind of claim.
-              #
-              # Downgraded rather than dropped: the review still records that it found
-              # nothing blocking, and the position it does not take is the one it
-              # cannot stand behind.
-              if [ "$APPROVE_ON_SUCCESS" = "true" ]; then
-                if [ -n "$head_sha" ] && [ "$head_state" != moved ]; then
-                  event=APPROVE
-                  note="review found nothing blocking."
-                elif [ -z "$head_sha" ]; then
-                  event=COMMENT
-                  note="review found nothing blocking. It does not approve: the commit it read was not recorded, so an approval here would name whatever is at the head of this pull request now."
-                  echo "::warning::the reviewed commit was not recorded on $REPO#$PR, so this review comments where it would have approved; an approval would have named a commit the review may not have read"
-                else
-                  event=COMMENT
-                  note="review found nothing blocking in the commit it read. It does not approve: this pull request was pushed to while the review ran, so the approval would stand against code the review never saw. Ask for another review to have the new commit read."
-                fi
-              fi
-              ;;
-            comment)
-              # Only where something actually WITHHELD -- an unaccepted pre-existing
-              # blocker, a reply that never affirmed it read the diff, or a reply that
-              # wrote nothing down. Those are exactly the states the driver concludes
-              # something other than success for, and they are the states where its
-              # own notice names the finding that decided it.
-              #
-              # `comment` beside `success` is a different thing: the agent wrote the
-              # word, nothing withheld, and the driver publishes NO notice. Recording
-              # a review there would claim a finding that does not exist, beside a
-              # thumbs-up the reaction step leaves off the same success. So this takes
-              # no position, which is what it did before v0.20.0.
-              if [ "$conclusion" != "success" ]; then
-                event=COMMENT
-                note="review took no position. Its verdict on this pull request names the finding that withheld approval."
-              fi
-              ;;
-            "")
-              # Already warned above, where the field was read. A second line here
-              # would report one missing field twice.
-              ;;
-            *)
-              echo "::warning::unrecognised decision \"$decision\" on $REPO#$PR; no position taken"
-              ;;
-          esac
 
           # commit_id is omitted rather than sent empty when the commit is unknown:
           # the API rejects an empty one, and its own default is the pull request's
@@ -2999,7 +3005,9 @@ jobs:
             return 1
           }
 
-          if [ -n "$event" ]; then
+          if [ -n "$event" ] && [ -n "${CARRIED:-}" ]; then
+            echo "the review carrying the verdict on $REPO#$PR recorded $CARRIED, so no second review is posted"
+          elif [ -n "$event" ]; then
             # Guarded, because set -e would abort the step here and take the
             # withdrawal below with it. A 422 on self-approval, a stale commit_id or
             # a transient 5xx must not also cost the pull request its retraction. The
