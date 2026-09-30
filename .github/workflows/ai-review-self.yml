@@ -23,4 +23,5 @@ jobs:
       # See: https://github.com/sei-protocol/uci/releases/tag/v0.0.22
       uci-ref: 4bd0b7826bdf7966c2bd899b8810a3aaaa52e80d
       allowed-team: 'sei-protocol/sei-core'
+      allowed-bots: '["dependabot[bot]"]'
       enable-cursor: false # Disabled for now since there is a dedicated Bugbot flow built into Cursor currently enabled on repo.
