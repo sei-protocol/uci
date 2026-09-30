@@ -2619,6 +2619,7 @@ jobs:
                 review_body="Findings on the changed lines. The verdict and the summary are in this tool's comment on this pull request."
                 echo "::warning::the driver left no verdict for the review on $REPO#$PR to carry, so it names where one will be and the verdict is posted on its own"
               fi
+              review_body+=$'\n\n'"<!-- seidroid-run:${GITHUB_RUN_ID:-}-${GITHUB_RUN_ATTEMPT:-} -->"
               review_event=COMMENT
               if [ "$carries_verdict" = true ] && [ -n "${EVENT:-}" ]; then
                 review_event="$EVENT"
