@@ -2666,6 +2666,23 @@ jobs:
                   landed=true
                 fi
               fi
+              found_id=""
+              if [ "$landed" = false ]; then
+                case "$(sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' "$response" || true)" in
+                  4??) ;;
+                  *)
+                    found_id="$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" 2>/dev/null \
+                      | jq -rs --arg body "$review_body" --arg sha "$head_sha" \
+                          '[.[][] | select(.body == $body and .commit_id == $sha)] | last | .id // empty' \
+                          2>/dev/null || true)"
+                    case "$found_id" in (''|*[!0-9]*) found_id="" ;; esac
+                    if [ -n "$found_id" ]; then
+                      echo "::warning::the review carrying $anchored comment(s) on $REPO#$PR returned no answer but landed as review $found_id"
+                      review_event="$(jq -r '.event' "$request")"
+                      landed=true
+                    fi ;;
+                esac
+              fi
               if [ "$landed" = true ]; then
                 on_line=$((on_line + anchored))
                 # The call carries every anchored comment and creates all of them or
@@ -2689,7 +2706,7 @@ jobs:
                   # JSON begins after the first empty line. A value that is not a number
                   # is no id, and reaching the API with one would edit nothing and report
                   # that it had.
-                  review_id="$(sed '1,/^[[:space:]]*$/d' "$response" | jq -r '.id // empty' 2>/dev/null || true)"
+                  review_id="${found_id:-$(sed '1,/^[[:space:]]*$/d' "$response" | jq -r '.id // empty' 2>/dev/null || true)}"
                   case "$review_id" in (''|*[!0-9]*) review_id="" ;; esac
                   if [ -z "$review_id" ]; then
                     echo "::warning::the review carrying the verdict posted on $REPO#$PR but its id could not be read, so what the verdict step would append to it goes to this run's log"
@@ -2954,6 +2971,14 @@ jobs:
           conclusion="${CONCLUSION:-unknown}"
           head_state="${HEAD_STATE:-unknown}"
           head_sha="${REVIEWED_SHA:-}"
+          if [ "$head_state" = same ]; then
+            now="$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null || true)"
+            case "$now" in
+              (''|*[!0-9a-f]*) head_state=unknown ;;
+              ("$head_sha") ;;
+              (*) head_state=moved ;;
+            esac
+          fi
 
           # commit_id is omitted rather than sent empty when the commit is unknown:
           # the API rejects an empty one, and its own default is the pull request's
