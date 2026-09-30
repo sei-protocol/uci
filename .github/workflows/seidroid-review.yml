@@ -1597,6 +1597,11 @@ jobs:
           if [ -n "${APP_SLUG:-}" ]; then login="${APP_SLUG}[bot]"; fi
           echo "REVIEWER_LOGIN=$login" >> "$GITHUB_ENV"
           echo "WORKFLOW_LOGIN=$workflow_login" >> "$GITHUB_ENV"
+          # GraphQL names a Bot author without the [bot] suffix REST puts on it, so the
+          # readers that go through GraphQL compare against these, beside __typename Bot
+          # so a user account holding the bare name is not mistaken for this tool.
+          echo "REVIEWER_BOT=${login%\[bot\]}" >> "$GITHUB_ENV"
+          echo "WORKFLOW_BOT=${workflow_login%\[bot\]}" >> "$GITHUB_ENV"
           echo "this review reads and posts as $login"
 
       - name: Read the threads this review left before
@@ -1691,10 +1696,10 @@ jobs:
                       path
                       line
                       originalLine
-                      root: comments(first: 1) { nodes { id body author { login } } }
+                      root: comments(first: 1) { nodes { id body author { __typename login } } }
                       recent: comments(last: 20) {
                         totalCount
-                        nodes { id body author { login } }
+                        nodes { id body author { __typename login } }
                       }
                     }
                     pageInfo { hasNextPage endCursor }
@@ -1729,9 +1734,9 @@ jobs:
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           jq '[ .[]
                 | select((.root.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
-                | select(.root.nodes[0].author.login
-                         | . != null and . != ""
-                           and (. == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))
+                | select(.root.nodes[0].author
+                         | . != null and .__typename == "Bot" and (.login // "") != ""
+                           and (.login == $ENV.REVIEWER_BOT or .login == $ENV.WORKFLOW_BOT))
                 | . as $t
                 | { thread_id: (.id // ""),
                     file: (.path // ""),
@@ -1763,9 +1768,9 @@ jobs:
           # shellcheck disable=SC2016  # $ENV is jq's
           shortened="$(jq --argjson window 20 '[ .[]
                           | select((.root.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))
-                          | select(.root.nodes[0].author.login
-                                   | . != null and . != ""
-                                     and (. == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))
+                          | select(.root.nodes[0].author
+                                   | . != null and .__typename == "Bot" and (.login // "") != ""
+                                     and (.login == $ENV.REVIEWER_BOT or .login == $ENV.WORKFLOW_BOT))
                           | select(.recent.totalCount > $window + 1)
                         ] | length' "$THREADS.raw")"
           if [ "$shortened" -gt 0 ]; then
@@ -3924,7 +3929,7 @@ jobs:
                     nodes {
                       id
                       isResolved
-                      comments(first: 1) { nodes { body author { login } } }
+                      comments(first: 1) { nodes { body author { __typename login } } }
                     }
                     pageInfo { hasNextPage endCursor }
                   }
@@ -3954,11 +3959,13 @@ jobs:
           # shellcheck disable=SC2016  # $ENV is jq's, and single quotes are what keep it jq's
           marked='.[] | select((.comments.nodes[0].body // "") | startswith($ENV.FINDING_MARKER))'
           # shellcheck disable=SC2016  # same
-          mine=' | select((.comments.nodes[0].author.login // "") == $ENV.REVIEWER_LOGIN)'
+          mine=' | select(.comments.nodes[0].author
+                          | . != null and .__typename == "Bot" and (.login // "") != ""
+                            and .login == $ENV.REVIEWER_BOT)'
           # shellcheck disable=SC2016  # same
-          anyOfOurs=' | select(.comments.nodes[0].author.login
-                               | . != null and . != ""
-                                 and (. == $ENV.REVIEWER_LOGIN or . == $ENV.WORKFLOW_LOGIN))'
+          anyOfOurs=' | select(.comments.nodes[0].author
+                               | . != null and .__typename == "Bot" and (.login // "") != ""
+                                 and (.login == $ENV.REVIEWER_BOT or .login == $ENV.WORKFLOW_BOT))'
           ours="$(jq -r "$marked$mine | .id" "$state")"
           open="$(jq -r "$marked$mine | select(.isResolved | not) | .id" "$state")"
           either="$(jq -r "$marked$anyOfOurs | .id" "$state")"
