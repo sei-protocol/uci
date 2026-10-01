@@ -1,0 +1,96 @@
+# Wiring only. The review logic is this repository's seidroid-review.yml, called at a
+# released commit so a pull request that changes it is reviewed by the last release,
+# not by itself. The reviewer binary is sei-internal-skills' sei-agent-driver.
+#
+#   @seidroid review                  review this pull request
+#   @seidroid review close            destroy this pull request's session now
+name: seidroid review
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [opened, ready_for_review, synchronize, reopened, closed]
+
+permissions: {}
+
+jobs:
+  # A run Dependabot triggers gets Dependabot's secrets only, so the review would fail
+  # on the missing machine credential; it is skipped. A person's push, or
+  # `@seidroid review`, on a Dependabot pull request still reviews it.
+  seidroid-review:
+    if: >-
+      (github.event_name == 'pull_request' &&
+        github.event.action != 'closed' &&
+        github.actor != 'dependabot[bot]') ||
+      (((github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request != null) ||
+        github.event_name == 'pull_request_review_comment' ||
+        github.event_name == 'pull_request_review') &&
+        contains(github.event.comment.body || github.event.review.body,
+          '@seidroid review') &&
+        !contains(github.event.comment.body || github.event.review.body,
+          '@seidroid review close'))
+    uses: sei-protocol/uci/.github/workflows/seidroid-review.yml@0dc48cfb58b6c88f528b6def9784524d444ed0f6 # v0.0.26
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+      issues: write
+    secrets:
+      OMNIGENT_MACHINE_CLIENT_SECRET: ${{ secrets.OMNIGENT_MACHINE_CLIENT_SECRET }}
+      SEIDROID_APP_ID: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
+      SEIDROID_APP_PRIVATE_KEY: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
+    with:
+      mode: review
+      approve-on-success: true
+      allowed-team: 'sei-protocol/sei-core'
+
+  # Anchored, unlike the review job's `contains`: the reusable workflow does not
+  # re-derive the mode from the body, so a comment that starts with `@seidroid review`
+  # and quotes the close command later must not reach this destructive job. Such a
+  # comment runs neither job.
+  seidroid-review-close:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '@seidroid review close')
+    uses: sei-protocol/uci/.github/workflows/seidroid-review.yml@0dc48cfb58b6c88f528b6def9784524d444ed0f6 # v0.0.26
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+      issues: write
+    secrets:
+      OMNIGENT_MACHINE_CLIENT_SECRET: ${{ secrets.OMNIGENT_MACHINE_CLIENT_SECRET }}
+      SEIDROID_APP_ID: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
+      SEIDROID_APP_PRIVATE_KEY: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
+    with:
+      mode: close
+      allowed-team: 'sei-protocol/sei-core'
+
+  # Skipped when Dependabot closes its own pull request, because that run lacks the
+  # secrets. After a manual review of a Dependabot pull request, comment
+  # `@seidroid review close` if Dependabot may supersede it. A fork pull request gets
+  # no secrets either, so close it the same way before merging.
+  seidroid-review-reclaim:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.actor != 'dependabot[bot]'
+    uses: sei-protocol/uci/.github/workflows/seidroid-review.yml@0dc48cfb58b6c88f528b6def9784524d444ed0f6 # v0.0.26
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+      issues: write
+    secrets:
+      OMNIGENT_MACHINE_CLIENT_SECRET: ${{ secrets.OMNIGENT_MACHINE_CLIENT_SECRET }}
+      SEIDROID_APP_ID: ${{ secrets.PLATFORM_CODE_AGENT_APP_ID }}
+      SEIDROID_APP_PRIVATE_KEY: ${{ secrets.PLATFORM_CODE_AGENT_APP_PK }}
+    with:
+      mode: close
