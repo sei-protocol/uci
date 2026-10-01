@@ -370,6 +370,18 @@ on:
         required: false
         type: string
         default: 'claude-opus-5-5[1m]'
+      claude-effort:
+        description: >-
+          Reasoning effort to answer the review at, substituting for the one the
+          agent's spec names. Set it empty to leave the spec's own. Passed to the
+          driver as SEIDROID_EFFORT, which a driver older than the one that reads
+          it ignores.
+
+          It applies to the review's own agent only, for the reason claude-model
+          states. A scout takes its effort from its own bundle.
+        required: false
+        type: string
+        default: 'high'
       allow-tools:
         description: >-
           Comma-separated tool_name values to accept. This deployment does stamp
@@ -1985,6 +1997,7 @@ jobs:
           OMNIGENT_BASE_URL: ${{ inputs.omnigent-base-url }}
           SEIDROID_SCOUTS: ${{ inputs.scouts }}
           SEIDROID_MODEL: ${{ inputs.claude-model }}
+          SEIDROID_EFFORT: ${{ inputs.claude-effort }}
           SEIDROID_ALLOW_TOOLS: ${{ inputs.allow-tools }}
           MODE: ${{ inputs.mode }}
           # The reviewed pull request. The driver keys the session on this pair.
