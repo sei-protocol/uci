@@ -44,14 +44,14 @@ on:
 
           The module is nested, so the repository carries path-prefixed tags
           (sei-agent-driver/vX.Y.Z) while `go install` takes the bare version. Pass
-          `v0.23.0`; `sei-agent-driver/v0.23.0` is refused as a disallowed version
+          `v0.23.1`; `sei-agent-driver/v0.23.1` is refused as a disallowed version
           string. A commit sha resolves to a pseudo-version.
 
           Verify a pin from an EMPTY module cache: a warm one is a false green, because
           it resolves a pin the proxy may never have served.
         required: false
         type: string
-        default: 'v0.23.0'
+        default: 'v0.23.1'
       trigger-phrase:
         description: >-
           The mention a person types to ask for a review. The command is that phrase
@@ -1397,7 +1397,7 @@ jobs:
           # Raising the default alone leaves a floor that goes on admitting a driver
           # this file no longer drives -- the drift the whole check exists to catch, and
           # the direction that says nothing while it happens.
-          # Four releases are load-bearing in a way the list above does not cover, and
+          # Five releases are load-bearing in a way the list above does not cover, and
           # the floor is the latest of them. The position step submits `.decision` from
           # the check file, only v0.20.0 and later write it, and a file without it costs
           # the review its position AND its withdrawal. v0.21.0 then renders the verdict
@@ -1412,19 +1412,23 @@ jobs:
           # and a person has to re-run it. v0.23.0 reads SEIDROID_EFFORT, which
           # claude-effort sets, and deletes the session of a refused reply. An older
           # driver reviews at the spec's effort, and its re-run repeats the refused
-          # reply.
+          # reply. v0.23.1 re-reads the session for up to 10 s when the reply at the
+          # turn-end edge is missing or unfinished. On claude-native the final message
+          # can reach the server after that edge. An older driver reads once, takes an
+          # earlier progress note or nothing as the reply, and fails the review as a
+          # no-verdict, exit 5.
           #
           # An older driver reaching the review path would take all of that silently,
           # which is why the floor is the gate rather than a default.
-          MIN_DRIVER_VERSION: 'v0.23.0'
+          MIN_DRIVER_VERSION: 'v0.23.1'
           # The sha256 of the MIN_DRIVER_VERSION release archives, from that release's
           # checksums.txt. They move with MIN_DRIVER_VERSION and the driver-version
           # default: one release, three places. The install below downloads the
           # prebuilt binary only when it can match these bytes. So swapping the binary
           # takes a change to this reviewed file as well as to the release. Any other
           # version, or a missing or unreachable release, builds with go install.
-          DRIVER_SHA256_LINUX_AMD64: 'd31a92082b8b00c930a86dff0b0b2b2d49fb94d654ed51c0df68fdabe3a2e3e9'
-          DRIVER_SHA256_LINUX_ARM64: '39d7508a45950ac9e2f91d785f65f9fb09d1dfe0204c80dbf4a0d29193146e57'
+          DRIVER_SHA256_LINUX_AMD64: '28f3bd6ac56d5b321a4fce0c808699eb229cec2cb8c2748537ddcfb4cc7f9ff0'
+          DRIVER_SHA256_LINUX_ARM64: 'c8eab3d9385a80deaca2f7cce55f27e0eb7ea12ba7f2d509d13a3f3a9cb2d3dc'
         run: |
           set -euo pipefail
           # An input default applies only when the caller omits the key. A caller that
