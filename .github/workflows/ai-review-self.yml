@@ -12,7 +12,7 @@ jobs:
   ai-review:
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
     # See: https://github.com/sei-protocol/uci/releases/tag/v0.0.22
-    uses: sei-protocol/uci/.github/workflows/ai-review.yml@4bd0b7826bdf7966c2bd899b8810a3aaaa52e80d
+    uses: sei-protocol/uci/.github/workflows/ai-review.yml@a3e422db031508ff0b2adf2e66e5a2860a8858e2
     permissions:
       contents: read
       pull-requests: write
