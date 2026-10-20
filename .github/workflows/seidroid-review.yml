@@ -283,7 +283,7 @@ on:
 
           This default is a development deployment. Platform changes land there
           first, so a change on it can make a review succeed and post nothing.
-          Masih Derkani accepts that exposure: no production deployment carries
+          The Platform team accepts that exposure: no production deployment carries
           the seidroid bundle and a provisioned machine client today. Pass a
           production URL from a merge-path caller as soon as one exists.
         required: false
@@ -401,7 +401,7 @@ on:
           three extra tool calls recovering. The diff now stages into the working
           directory, so this grant is the belt to that braces.
 
-          Masih Derkani accepts the unrestricted shell. The review builds and
+          The Platform team accepts the unrestricted shell. The review builds and
           tests the tree where that is straightforward. A reviewer that cannot
           compile can only guess at a finding that needs one. ai-review scopes its
           own model to `Read,Bash(gh pr diff:*),Bash(gh pr view:*)` and gives up
