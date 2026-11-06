@@ -4,3 +4,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/.github/seidroid/review-v2"
+    schedule:
+      interval: "weekly"

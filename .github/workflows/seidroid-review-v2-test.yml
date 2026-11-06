@@ -1,0 +1,35 @@
+name: seidroid review v2
+
+on:
+  pull_request:
+    paths:
+      - '.github/seidroid/review-v2/**'
+      - '.github/workflows/seidroid-review-v2-test.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/seidroid/review-v2/**'
+      - '.github/workflows/seidroid-review-v2-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/seidroid/review-v2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: .github/seidroid/review-v2/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
